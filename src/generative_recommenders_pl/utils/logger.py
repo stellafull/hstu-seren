@@ -1,7 +1,23 @@
 import logging
 from typing import Mapping, Optional
 
-import torch
+# Provide a lightweight fallback for torch when not installed
+try:  # pragma: no cover - runtime convenience
+    import torch  # type: ignore
+except Exception:  # pragma: no cover
+    class _DummyDist:
+        @staticmethod
+        def is_initialized() -> bool:
+            return False
+
+        @staticmethod
+        def get_rank() -> int:
+            return 0
+
+    class _DummyTorch:
+        distributed = _DummyDist()
+
+    torch = _DummyTorch()  # type: ignore
 
 
 class RankedLogger(logging.LoggerAdapter):

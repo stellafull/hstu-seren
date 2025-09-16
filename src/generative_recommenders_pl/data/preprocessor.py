@@ -1,24 +1,393 @@
-import abc
-import logging
-import os
-import tarfile
-from typing import Optional
-from urllib.request import urlretrieve
-from zipfile import ZipFile
+from __future__ import annotations
 
-import numpy as np
+import abc
+import gzip
+import json
+import os
+import shutil
+import tempfile
+import urllib.request
+import zipfile
+from collections.abc import Mapping as MappingABC
+from pathlib import Path
+from typing import Dict, Iterable, Mapping, Optional, Sequence
+
 import pandas as pd
 
 from generative_recommenders_pl.utils.logger import RankedLogger
 
 log = RankedLogger(__name__)
 
+MODULE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MODULE_DIR.parent.parent.parent
+DEFAULT_ROOT = PROJECT_ROOT / "tmp"
+
+DATASETS = {
+    "serendipity-2018": {
+        "url": "https://files.grouplens.org/datasets/serendipity-sac2018/serendipity-sac2018.zip",
+        "type": "zip",
+    },
+    "amzn_books_2015": {
+        "urls": [
+            (
+                "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Books.json.gz",
+                "meta_Books.json.gz",
+            ),
+            (
+                "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/ratings_Books.csv",
+                "ratings_Books.csv",
+            ),
+            (
+                "https://raw.githubusercontent.com/zhefu2/SerenLens/master/Dataset/SerenLens_Books.csv",
+                "SerenLens_Books.csv",
+            ),
+        ],
+        "gunzip": [("meta_Books.json.gz", "meta_Books.json")],
+        "lfs_files": [
+            {
+                "remote": "Dataset/SerenLens_Books.csv",
+                "local": "SerenLens_Books.csv",
+            }
+        ],
+    },
+    "amzn_mv_2015": {
+        "urls": [
+            (
+                "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Movies_and_TV.json.gz",
+                "meta_Movies_and_TV.json.gz",
+            ),
+            (
+                "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/ratings_Movies_and_TV.csv",
+                "ratings_Movies_and_TV.csv",
+            ),
+            (
+                "https://raw.githubusercontent.com/zhefu2/SerenLens/master/Dataset/SerenLens_Movies.csv",
+                "SerenLens_Movies.csv",
+            ),
+        ],
+        "gunzip": [("meta_Movies_and_TV.json.gz", "meta_Movies_and_TV.json")],
+        "lfs_files": [
+            {
+                "remote": "Dataset/SerenLens_Movies.csv",
+                "local": "SerenLens_Movies.csv",
+            }
+        ],
+    },
+}
+
+LFS_CONFIG = {"owner": "zhefu2", "repo": "SerenLens", "ref": "refs/heads/master"}
+
+AMAZON_DOMAIN_CONFIG = {
+    "books": {
+        "dataset": "amzn_books_2015",
+        "ratings": "ratings_Books.csv",
+        "serenlens": "SerenLens_Books.csv",
+        "meta": "meta_Books.json",
+    },
+    "movies": {
+        "dataset": "amzn_mv_2015",
+        "ratings": "ratings_Movies_and_TV.csv",
+        "serenlens": "SerenLens_Movies.csv",
+        "meta": "meta_Movies_and_TV.json",
+    },
+}
+
+SERENDIPITY2018_SUBSETS = {
+    "train": "training.csv",
+    "answers": "answers.csv",
+}
+
+
+def _download(
+    url: str,
+    filepath: Path,
+    headers: Optional[Mapping[str, str]] = None,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Download a file from URL to *filepath* if missing."""
+    if filepath.exists() and not overwrite:
+        return
+
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    req_headers = {"User-Agent": "Mozilla/5.0"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req) as resp, open(filepath, "wb") as file_obj:
+        shutil.copyfileobj(resp, file_obj, length=1024 * 1024)
+
+
+def _gunzip_file(src: Path, dst: Path) -> None:
+    """Decompress gzip file if destination doesn't exist."""
+    if not src.exists() or dst.exists():
+        return
+
+    with gzip.open(src, "rb") as f_in, open(dst, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
+
+
+def _resolve_lfs_file(filepath: Path, remote_path: str) -> None:
+    """Resolve Git LFS pointer files via GitHub's batch API."""
+    if not filepath.exists():
+        return
+
+    try:
+        with open(filepath, "rb") as file_obj:
+            head = file_obj.read(128).decode("utf-8", errors="ignore")
+        if not head.startswith("version https://git-lfs.github.com/spec/v1"):
+            return
+    except Exception:
+        return
+
+    oid: Optional[str] = None
+    size: Optional[int] = None
+    try:
+        with open(filepath, "r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                if line.startswith("oid sha256:"):
+                    oid = line.split(":", 1)[1].strip()
+                elif line.startswith("size "):
+                    try:
+                        size = int(line.split()[1])
+                    except (IndexError, ValueError):
+                        size = None
+        if not oid or not size:
+            return
+
+        branch = LFS_CONFIG["ref"].rsplit("/", 1)[-1]
+        media_url = (
+            f"https://media.githubusercontent.com/media/{LFS_CONFIG['owner']}/"
+            f"{LFS_CONFIG['repo']}/{branch}/{remote_path}"
+        )
+        try:
+            _download(media_url, filepath, overwrite=True)
+            return
+        except Exception as exc:
+            log.warning(
+                "Direct media download failed for %s (remote %s): %s", filepath, remote_path, exc
+            )
+
+        payload = {
+            "operation": "download",
+            "objects": [{"oid": oid, "size": size}],
+            "transfers": ["basic"],
+            "ref": {"name": LFS_CONFIG["ref"]},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Accept": "application/vnd.git-lfs+json",
+            "Content-Type": "application/vnd.git-lfs+json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        batch_url = (
+            f"https://github.com/{LFS_CONFIG['owner']}/{LFS_CONFIG['repo']}.git/info/lfs/objects/batch"
+        )
+        request = urllib.request.Request(
+            batch_url, data=data, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        download_info = result.get("objects", [{}])[0].get("actions", {}).get("download")
+        if download_info and "href" in download_info:
+            _download(
+                download_info["href"],
+                filepath,
+                headers=download_info.get("header", {}),
+                overwrite=True,
+            )
+    except Exception as exc:
+        log.warning("Failed to resolve LFS file %s: %s", filepath, exc)
+        return
+
+
+def _dataset_exists(dataset_path: Path, dataset_config: Mapping[str, object]) -> bool:
+    if not dataset_path.is_dir():
+        return False
+
+    dataset_type = dataset_config.get("type")
+    if dataset_type == "zip":
+        try:
+            return any(dataset_path.iterdir())
+        except OSError:
+            return False
+
+    if "urls" in dataset_config:
+        for _, filename in dataset_config["urls"]:  # type: ignore[index]
+            if not (dataset_path / filename).exists():
+                return False
+
+        for entry in dataset_config.get("lfs_files", []):  # type: ignore[call-arg]
+            if isinstance(entry, MappingABC):
+                local_name = entry.get("local") or entry.get("remote")
+            else:
+                local_name = entry
+            if not local_name:
+                continue
+            pointer_path = dataset_path / str(local_name)
+            if pointer_path.exists():
+                try:
+                    with open(pointer_path, "r", encoding="utf-8", errors="ignore") as file_obj:
+                        first_line = file_obj.readline()
+                    if first_line.startswith(
+                        "version https://git-lfs.github.com/spec/v1"
+                    ):
+                        return False
+                except OSError:
+                    return False
+
+        for src, dst in dataset_config.get("gunzip", []):  # type: ignore[call-arg]
+            src_path = dataset_path / src
+            dst_path = dataset_path / dst
+            if src_path.exists() and not dst_path.exists():
+                return False
+
+    return True
+
+
+def _download_zip_dataset(dataset_path: Path, url: str) -> None:
+    dataset_path.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        zip_path = Path(temp_dir) / "dataset.zip"
+        _download(url, zip_path)
+        with zipfile.ZipFile(zip_path, "r") as zip_file:
+            zip_file.extractall(dataset_path)
+
+
+def _download_url_dataset(dataset_path: Path, config: Mapping[str, object]) -> None:
+    dataset_path.mkdir(parents=True, exist_ok=True)
+    for url, filename in config.get("urls", []):  # type: ignore[assignment]
+        _download(url, dataset_path / filename)
+    for entry in config.get("lfs_files", []):  # type: ignore[call-arg]
+        if isinstance(entry, MappingABC):
+            remote = entry.get("remote")
+            local = entry.get("local") or remote
+        else:
+            remote = entry
+            local = entry
+        if not remote or not local:
+            continue
+        _resolve_lfs_file(dataset_path / str(local), str(remote))
+    for src, dst in config.get("gunzip", []):  # type: ignore[call-arg]
+        _gunzip_file(dataset_path / src, dataset_path / dst)
+
+
+def download_dataset(name: str, root: str | Path | None = None) -> bool:
+    if name not in DATASETS:
+        raise ValueError(f"Unknown dataset: {name}")
+
+    root_path = Path(root) if root is not None else DEFAULT_ROOT
+    dataset_path = root_path / name
+    config = DATASETS[name]
+
+    if _dataset_exists(dataset_path, config):
+        return True
+
+    try:
+        if config.get("type") == "zip":
+            _download_zip_dataset(dataset_path, config["url"])  # type: ignore[index]
+        else:
+            _download_url_dataset(dataset_path, config)
+    except Exception as exc:
+        log.exception("Failed to download dataset %s: %s", name, exc)
+        return False
+
+    return _dataset_exists(dataset_path, config)
+
+
+def download_all(root: str | Path | None = None) -> Dict[str, bool]:
+    return {name: download_dataset(name, root=root) for name in DATASETS}
+
+
+def _ensure_mapping(
+    mapping_path: Path,
+    raw_values: Iterable[object],
+    *,
+    encoded_col: str,
+    raw_col: str,
+    extra_metadata: Optional[Dict[str, str]] = None,
+) -> Dict[str, int]:
+    """Load or create an ID mapping stored as CSV."""
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    processed_values = [str(v) for v in raw_values if pd.notna(v)]
+    unique_values = sorted(set(processed_values))
+
+    if mapping_path.exists():
+        df = pd.read_csv(mapping_path)
+        df[raw_col] = df[raw_col].astype(str)
+        mapping: Dict[str, int] = dict(zip(df[raw_col], df[encoded_col].astype(int)))
+        missing = sorted(set(unique_values) - set(mapping.keys()))
+        if missing:
+            start_idx = max(mapping.values(), default=-1) + 1
+            new_rows = pd.DataFrame(
+                {encoded_col: range(start_idx, start_idx + len(missing)), raw_col: missing}
+            )
+            if extra_metadata:
+                for key, value in extra_metadata.items():
+                    new_rows[key] = value
+            df = pd.concat([df, new_rows], ignore_index=True)
+            df.to_csv(mapping_path, index=False)
+            mapping.update(dict(zip(new_rows[raw_col], new_rows[encoded_col])))
+        if extra_metadata:
+            for key, value in extra_metadata.items():
+                if key not in df.columns:
+                    df[key] = value
+                else:
+                    df[key] = df[key].fillna(value)
+            df.to_csv(mapping_path, index=False)
+        return mapping
+
+    data = {encoded_col: range(len(unique_values)), raw_col: unique_values}
+    if extra_metadata:
+        for key, value in extra_metadata.items():
+            data[key] = [value] * len(unique_values)
+    df = pd.DataFrame(data)
+    df.to_csv(mapping_path, index=False)
+    return dict(zip(df[raw_col], df[encoded_col]))
+
+
+def _resolve_column(columns: Sequence[str], keywords: Sequence[str]) -> Optional[str]:
+    lowered = {column.lower(): column for column in columns}
+    for keyword in keywords:
+        for column_lower, column in lowered.items():
+            if keyword in column_lower:
+                return column
+    return None
+
+
+def _sequence_frame(
+    frame: pd.DataFrame,
+    *,
+    user_col: str,
+    item_col: str,
+    rating_col: str,
+    timestamp_col: str,
+    min_length: int = 1,
+    extra_cols: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    ordered = frame.sort_values(by=[user_col, timestamp_col])
+    grouped = ordered.groupby(user_col, sort=False)
+    item_lists = grouped[item_col].apply(list)
+    rating_lists = grouped[rating_col].apply(list)
+    timestamp_lists = grouped[timestamp_col].apply(list)
+    data = {
+        "user_id": list(item_lists.index),
+        "item_ids": item_lists.values,
+        "ratings": rating_lists.values,
+        "timestamps": timestamp_lists.values,
+    }
+    if extra_cols:
+        for col in extra_cols:
+            if col in frame.columns:
+                data[col] = grouped[col].apply(list).values
+    seq_df = pd.DataFrame(data)
+    if min_length > 1:
+        seq_df = seq_df[seq_df["item_ids"].apply(len) >= min_length]
+    return seq_df
+
 
 class DataProcessor:
-    """
-    This preprocessor does not remap item_ids. This is intended so that we can easily join other
-    side-information based on item_ids later.
-    """
+    """Abstract base class for creating SASRec-ready datasets."""
 
     def __init__(
         self,
@@ -26,7 +395,7 @@ class DataProcessor:
         expected_num_unique_items: Optional[int],
         expected_max_item_id: Optional[int],
     ) -> None:
-        self._prefix: str = prefix
+        self._prefix = prefix
         self._expected_num_unique_items = expected_num_unique_items
         self._expected_max_item_id = expected_max_item_id
 
@@ -40,19 +409,21 @@ class DataProcessor:
 
     @abc.abstractmethod
     def processed_item_csv(self) -> str:
-        pass
+        raise NotImplementedError
 
     @abc.abstractmethod
     def preprocess_rating(self) -> int:
-        pass
+        raise NotImplementedError
 
     def output_format_csv(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format.csv"
+        return str(DEFAULT_ROOT / self._prefix / "sasrec_format.csv")
 
     def to_seq_data(
         self,
         ratings_data: pd.DataFrame,
         user_data: Optional[pd.DataFrame] = None,
+        *,
+        sequence_columns: Optional[Mapping[str, str]] = None,
     ) -> pd.DataFrame:
         if user_data is not None:
             ratings_data_transformed = ratings_data.join(
@@ -61,14 +432,20 @@ class DataProcessor:
         else:
             ratings_data_transformed = ratings_data
         ratings_data_transformed.item_ids = ratings_data_transformed.item_ids.apply(
-            lambda x: ",".join([str(v) for v in x])
+            lambda x: ",".join(str(v) for v in x)
         )
         ratings_data_transformed.ratings = ratings_data_transformed.ratings.apply(
-            lambda x: ",".join([str(v) for v in x])
+            lambda x: ",".join(str(v) for v in x)
         )
         ratings_data_transformed.timestamps = ratings_data_transformed.timestamps.apply(
-            lambda x: ",".join([str(v) for v in x])
+            lambda x: ",".join(str(v) for v in x)
         )
+        if sequence_columns:
+            for column, _ in sequence_columns.items():
+                if column in ratings_data_transformed.columns:
+                    ratings_data_transformed[column] = ratings_data_transformed[column].apply(
+                        lambda x: ",".join(str(v) for v in x)
+                    )
         ratings_data_transformed.rename(
             columns={
                 "item_ids": "sequence_item_ids",
@@ -77,318 +454,492 @@ class DataProcessor:
             },
             inplace=True,
         )
+        if sequence_columns:
+            rename_map = {
+                column: new_name
+                for column, new_name in sequence_columns.items()
+                if column in ratings_data_transformed.columns
+            }
+            if rename_map:
+                ratings_data_transformed.rename(columns=rename_map, inplace=True)
         return ratings_data_transformed
 
     def file_exists(self, name: str) -> bool:
-        return os.path.isfile("%s/%s" % (os.getcwd(), name))
+        return (Path(os.getcwd()) / name).is_file()
 
 
-class MovielensDataProcessor(DataProcessor):
+class SerendipityAmazonDataProcessor(DataProcessor):
+    """Preprocess SerenLens-enhanced Amazon domains into SASRec format."""
+
     def __init__(
         self,
-        download_path: str,
-        saved_name: str,
-        prefix: str,
-        convert_timestamp: bool,
-        expected_num_unique_items: Optional[int] = None,
-        expected_max_item_id: Optional[int] = None,
+        domain: str,
+        subset: str,
+        *,
+        root: str | Path = DEFAULT_ROOT,
+        min_sequence_length: int = 1,
     ) -> None:
-        super().__init__(prefix, expected_num_unique_items, expected_max_item_id)
-        self._download_path = download_path
-        self._saved_name = saved_name
-        self._convert_timestamp: bool = convert_timestamp
+        domain_key = domain.lower()
+        subset_key = subset.lower()
+        if domain_key not in AMAZON_DOMAIN_CONFIG:
+            raise ValueError(f"Unsupported domain '{domain}'. Choose from {list(AMAZON_DOMAIN_CONFIG)}")
+        if subset_key not in {"ratings", "serenlens"}:
+            raise ValueError("subset must be either 'ratings' or 'serenlens'")
 
-    def download(self) -> None:
-        if not self.file_exists(self._saved_name):
-            urlretrieve(self._download_path, self._saved_name)
-        if self._saved_name[-4:] == ".zip":
-            ZipFile(self._saved_name, "r").extractall(path="tmp/")
-        else:
-            with tarfile.open(self._saved_name, "r:*") as tar_ref:
-                tar_ref.extractall("tmp/")
+        prefix = f"{domain_key}-{subset_key}"
+        super().__init__(prefix, expected_num_unique_items=None, expected_max_item_id=None)
+        self._domain = domain_key
+        self._subset = subset_key
+        self._root = Path(root)
+        self._dataset_config = AMAZON_DOMAIN_CONFIG[domain_key]
+        self._domain_output_root = self._root / "serendipity-aware" / domain_key
+        self._domain_output_root.mkdir(parents=True, exist_ok=True)
+        self._mapping_dir = self._domain_output_root / "mappings"
+        self._user_mapping_path = self._mapping_dir / "user_mapping.csv"
+        self._item_mapping_path = self._mapping_dir / "item_mapping.csv"
+        self._min_sequence_length = min_sequence_length
+        self._output_path = self._domain_output_root / f"{subset_key}_sasrec.csv"
+        self._raw_output_path = self._domain_output_root / f"{subset_key}_sasrec_raw.csv"
+        self.outputs: Dict[str, str] = {}
+
+    def _load_mapping_stats(self) -> None:
+        if self._expected_num_unique_items is not None and self._expected_max_item_id is not None:
+            return
+        if not self._item_mapping_path.exists():
+            return
+        mapping_df = pd.read_csv(self._item_mapping_path)
+        if "item_id" not in mapping_df.columns:
+            return
+        self._expected_num_unique_items = int(mapping_df["item_id"].nunique())
+        self._expected_max_item_id = int(mapping_df["item_id"].max())
+
+    def expected_num_unique_items(self) -> Optional[int]:
+        self._load_mapping_stats()
+        return self._expected_num_unique_items
+
+    def expected_max_item_id(self) -> Optional[int]:
+        self._load_mapping_stats()
+        return self._expected_max_item_id
 
     def processed_item_csv(self) -> str:
-        return f"tmp/processed/{self._prefix}/movies.csv"
+        return str(self._item_mapping_path)
 
-    def sasrec_format_csv_by_user_train(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format_by_user_train.csv"
+    def output_format_csv(self) -> str:
+        return str(self._output_path)
 
-    def sasrec_format_csv_by_user_test(self) -> str:
-        return f"tmp/{self._prefix}/sasrec_format_by_user_test.csv"
-
-    def preprocess_rating(self) -> int:
-        self.download()
-
-        if self._prefix == "ml-1m":
-            users = pd.read_csv(
-                f"tmp/{self._prefix}/users.dat",
-                sep="::",
-                names=["user_id", "sex", "age_group", "occupation", "zip_code"],
-            )
-            ratings = pd.read_csv(
-                f"tmp/{self._prefix}/ratings.dat",
-                sep="::",
-                names=["user_id", "movie_id", "rating", "unix_timestamp"],
-            )
-            movies = pd.read_csv(
-                f"tmp/{self._prefix}/movies.dat",
-                sep="::",
-                names=["movie_id", "title", "genres"],
-                encoding="iso-8859-1",
-            )
-        elif self._prefix == "ml-20m":
-            # ml-20m
-            # ml-20m doesn't have user data.
-            users = None
-            # ratings: userId,movieId,rating,timestamp
-            ratings = pd.read_csv(
-                f"tmp/{self._prefix}/ratings.csv",
-                sep=",",
-            )
-            ratings.rename(
-                columns={
-                    "userId": "user_id",
-                    "movieId": "movie_id",
-                    "timestamp": "unix_timestamp",
-                },
-                inplace=True,
-            )
-            # movieId,title,genres
-            # 1,Toy Story (1995),Adventure|Animation|Children|Comedy|Fantasy
-            # 2,Jumanji (1995),Adventure|Children|Fantasy
-            movies = pd.read_csv(
-                f"tmp/{self._prefix}/movies.csv",
-                sep=",",
-                encoding="iso-8859-1",
-            )
-            movies.rename(columns={"movieId": "movie_id"}, inplace=True)
-        else:
-            assert self._prefix == "ml-20mx16x32"
-            # ml-1b
-            user_ids = []
-            movie_ids = []
-            for i in range(16):
-                train_file = f"tmp/{self._prefix}/trainx16x32_{i}.npz"
-                with np.load(train_file) as data:
-                    user_ids.extend([x[0] for x in data["arr_0"]])
-                    movie_ids.extend([x[1] for x in data["arr_0"]])
-            ratings = pd.DataFrame(
-                data={
-                    "user_id": user_ids,
-                    "movie_id": movie_ids,
-                    "rating": user_ids,  # placeholder
-                    "unix_timestamp": movie_ids,  # placeholder
-                }
-            )
-            users = None
-            movies = None
-
-        if movies is not None:
-            # ML-1M and ML-20M only
-            movies["year"] = movies["title"].apply(lambda x: x[-5:-1])
-            movies["cleaned_title"] = movies["title"].apply(lambda x: x[:-7])
-            # movies.year = pd.Categorical(movies.year)
-            # movies["year"] = movies.year.cat.codes
-
-        if users is not None:
-            ## Users (ml-1m only)
-            users.sex = pd.Categorical(users.sex)
-            users["sex"] = users.sex.cat.codes
-
-            users.age_group = pd.Categorical(users.age_group)
-            users["age_group"] = users.age_group.cat.codes
-
-            users.occupation = pd.Categorical(users.occupation)
-            users["occupation"] = users.occupation.cat.codes
-
-            users.zip_code = pd.Categorical(users.zip_code)
-            users["zip_code"] = users.zip_code.cat.codes
-
-        # Normalize movie ids to speed up training
-        log.info(
-            f"{self._prefix} #item before normalize: {len(set(ratings['movie_id'].values))}"
-        )
-        log.info(
-            f"{self._prefix} max item id before normalize: {max(set(ratings['movie_id'].values))}"
-        )
-        if self._convert_timestamp:
-            ratings["unix_timestamp"] = pd.to_datetime(
-                ratings["unix_timestamp"], unit="s"
-            )
-
-        # Save primary csv's
-        if not os.path.exists(f"tmp/processed/{self._prefix}"):
-            os.makedirs(f"tmp/processed/{self._prefix}")
-        if users is not None:
-            users.to_csv(f"tmp/processed/{self._prefix}/users.csv", index=False)
-        if movies is not None:
-            movies.to_csv(f"tmp/processed/{self._prefix}/movies.csv", index=False)
-        ratings.to_csv(f"tmp/processed/{self._prefix}/ratings.csv", index=False)
-
-        num_unique_users = len(set(ratings["user_id"].values))
-        num_unique_items = len(set(ratings["movie_id"].values))
-
-        # SASRec version
-        ratings_group = ratings.sort_values(by=["unix_timestamp"]).groupby("user_id")
-        seq_ratings_data = pd.DataFrame(
-            data={
-                "user_id": list(ratings_group.groups.keys()),
-                "item_ids": list(ratings_group.movie_id.apply(list)),
-                "ratings": list(ratings_group.rating.apply(list)),
-                "timestamps": list(ratings_group.unix_timestamp.apply(list)),
-            }
-        )
-
-        result = pd.DataFrame([[]])
-        for col in ["item_ids"]:
-            result[col + "_mean"] = seq_ratings_data[col].apply(len).mean()
-            result[col + "_min"] = seq_ratings_data[col].apply(len).min()
-            result[col + "_max"] = seq_ratings_data[col].apply(len).max()
-        log.info(self._prefix)
-        log.info(result)
-
-        seq_ratings_data = self.to_seq_data(seq_ratings_data, users)
-        seq_ratings_data.reset_index().to_csv(
-            self.output_format_csv(), index=False, sep=","
-        )
-
-        # Split by user ids (not tested yet)
-        user_id_split = int(num_unique_users * 0.9)
-        seq_ratings_data_train = seq_ratings_data[
-            seq_ratings_data["user_id"] <= user_id_split
-        ]
-        seq_ratings_data_train.reset_index().to_csv(
-            self.sasrec_format_csv_by_user_train(),
-            index=False,
-            sep=",",
-        )
-        seq_ratings_data_test = seq_ratings_data[
-            seq_ratings_data["user_id"] > user_id_split
-        ]
-        seq_ratings_data_test.reset_index().to_csv(
-            self.sasrec_format_csv_by_user_test(), index=False, sep=","
-        )
-        log.info(
-            f"{self._prefix}: train num user: {len(set(seq_ratings_data_train['user_id'].values))}"
-        )
-        log.info(
-            f"{self._prefix}: test num user: {len(set(seq_ratings_data_test['user_id'].values))}"
-        )
-
-        if self.expected_num_unique_items() is not None:
-            assert (
-                self.expected_num_unique_items() == num_unique_items
-            ), f"Expected items: {self.expected_num_unique_items()}, got: {num_unique_items}"
-
-        return num_unique_items
-
-
-class AmazonDataProcessor(DataProcessor):
-    def __init__(
-        self,
-        download_path: str,
-        saved_name: str,
-        prefix: str,
-        expected_num_unique_items: Optional[int],
-    ) -> None:
-        super().__init__(
-            prefix,
-            expected_num_unique_items=expected_num_unique_items,
-            expected_max_item_id=None,
-        )
-        self._download_path = download_path
-        self._saved_name = saved_name
-        self._prefix = prefix
-
-    def download(self) -> None:
-        if not self.file_exists(self._saved_name):
-            urlretrieve(self._download_path, self._saved_name)
+    def raw_output_format_csv(self) -> str:
+        return str(self._raw_output_path)
 
     def preprocess_rating(self) -> int:
-        self.download()
+        download_dataset(self._dataset_config["dataset"], root=self._root)
+        dataset_root = self._root / self._dataset_config["dataset"]
+        ratings_path = dataset_root / self._dataset_config["ratings"]
+        serenlens_path = dataset_root / self._dataset_config["serenlens"]
+        if not ratings_path.exists():
+            raise FileNotFoundError(f"Missing ratings file at {ratings_path}")
+        if not serenlens_path.exists():
+            raise FileNotFoundError(f"Missing SerenLens file at {serenlens_path}")
 
         ratings = pd.read_csv(
-            self._saved_name,
-            sep=",",
-            names=["user_id", "item_id", "rating", "timestamp"],
+            ratings_path,
+            names=["user_raw", "item_raw", "rating", "timestamp"],
         )
-        log.info(f"{self._prefix} #data points before filter: {ratings.shape[0]}")
-        log.info(
-            f"{self._prefix} #user before filter: {len(set(ratings['user_id'].values))}"
-        )
-        log.info(
-            f"{self._prefix} #item before filter: {len(set(ratings['item_id'].values))}"
-        )
+        serenlens = pd.read_csv(serenlens_path)
+        serenlens_user_col = _resolve_column(serenlens.columns, ["user", "reviewer"])
+        serenlens_item_col = _resolve_column(serenlens.columns, ["item", "asin"])
+        serenlens_rating_col = _resolve_column(serenlens.columns, ["rating", "score"])
+        serenlens_time_col = _resolve_column(serenlens.columns, ["time", "stamp"])
+        if not serenlens_user_col or not serenlens_item_col:
+            raise ValueError("Could not locate user or item columns in SerenLens dataset")
+        if serenlens_rating_col is None:
+            serenlens_rating_col = "rating"
+            serenlens[serenlens_rating_col] = 1.0
+        if serenlens_time_col is None:
+            serenlens_time_col = "timestamp"
+            serenlens[serenlens_time_col] = serenlens.groupby(serenlens_user_col, sort=False).cumcount()
 
-        # filter users and items with presence < 5
-        item_id_count = (
-            ratings["item_id"]
-            .value_counts()
-            .rename_axis("unique_values")
-            .reset_index(name="item_count")
-        )
-        user_id_count = (
-            ratings["user_id"]
-            .value_counts()
-            .rename_axis("unique_values")
-            .reset_index(name="user_count")
-        )
-        ratings = ratings.join(item_id_count.set_index("unique_values"), on="item_id")
-        ratings = ratings.join(user_id_count.set_index("unique_values"), on="user_id")
-        ratings = ratings[ratings["item_count"] >= 5]
-        ratings = ratings[ratings["user_count"] >= 5]
-        log.info(f"{self._prefix} #data points after filter: {ratings.shape[0]}")
-
-        # categorize user id and item id
-        ratings["item_id"] = pd.Categorical(ratings["item_id"])
-        ratings["item_id"] = ratings["item_id"].cat.codes
-        ratings["user_id"] = pd.Categorical(ratings["user_id"])
-        ratings["user_id"] = ratings["user_id"].cat.codes
-        log.info(
-            f"{self._prefix} #user after filter: {len(set(ratings['user_id'].values))}"
-        )
-        log.info(
-            f"{self._prefix} #item after filter: {len(set(ratings['item_id'].values))}"
-        )
-
-        num_unique_items = len(set(ratings["item_id"].values))
-
-        # SASRec version
-        ratings_group = ratings.sort_values(by=["timestamp"]).groupby("user_id")
-
-        seq_ratings_data = pd.DataFrame(
-            data={
-                "user_id": list(ratings_group.groups.keys()),
-                "item_ids": list(ratings_group.item_id.apply(list)),
-                "ratings": list(ratings_group.rating.apply(list)),
-                "timestamps": list(ratings_group.timestamp.apply(list)),
+        serenlens = serenlens.rename(
+            columns={
+                serenlens_user_col: "user_raw",
+                serenlens_item_col: "item_raw",
+                serenlens_rating_col: "rating",
+                serenlens_time_col: "timestamp",
             }
         )
+        selected_columns = ["user_raw", "item_raw", "rating", "timestamp"]
+        if "label" in serenlens.columns:
+            serenlens["label"] = pd.to_numeric(serenlens["label"], errors="coerce").fillna(0).astype(int)
+            selected_columns.append("label")
+        serenlens = serenlens[selected_columns]
 
-        seq_ratings_data = seq_ratings_data[
-            seq_ratings_data["item_ids"].apply(len) >= 5
-        ]
+        ratings["user_raw"] = ratings["user_raw"].astype(str).str.strip().str.upper()
+        ratings["item_raw"] = ratings["item_raw"].astype(str).str.strip().str.upper()
+        serenlens["user_raw"] = serenlens["user_raw"].astype(str).str.strip().str.upper()
+        serenlens["item_raw"] = serenlens["item_raw"].astype(str).str.strip().str.upper()
 
-        result = pd.DataFrame([[]])
-        for col in ["item_ids"]:
-            result[col + "_mean"] = seq_ratings_data[col].apply(len).mean()
-            result[col + "_min"] = seq_ratings_data[col].apply(len).min()
-            result[col + "_max"] = seq_ratings_data[col].apply(len).max()
-        log.info(self._prefix)
-        log.info(result)
+        serenlens_pairs = serenlens[["user_raw", "item_raw"]].drop_duplicates()
+        ratings = ratings.merge(
+            serenlens_pairs.assign(_in_serenlens=True),
+            on=["user_raw", "item_raw"],
+            how="left",
+        )
+        filtered_ratings = ratings[ratings["_in_serenlens"].isna()].drop(columns="_in_serenlens")
 
-        if not os.path.exists(f"tmp/{self._prefix}"):
-            os.makedirs(f"tmp/{self._prefix}")
-
-        seq_ratings_data = self.to_seq_data(seq_ratings_data)
-        seq_ratings_data.reset_index().to_csv(
-            self.output_format_csv(), index=False, sep=","
+        combined_users = pd.concat(
+            [filtered_ratings["user_raw"], serenlens["user_raw"]], ignore_index=True
+        )
+        combined_items = pd.concat(
+            [filtered_ratings["item_raw"], serenlens["item_raw"]], ignore_index=True
         )
 
-        if self.expected_num_unique_items() is not None:
-            assert (
-                self.expected_num_unique_items() == num_unique_items
-            ), f"expected: {self.expected_num_unique_items()}, actual: {num_unique_items}"
-            logging.info(f"{self.expected_num_unique_items()} unique items.")
+        user_mapping = _ensure_mapping(
+            self._user_mapping_path,
+            combined_users.tolist(),
+            encoded_col="user_id",
+            raw_col="raw_user_id",
+            extra_metadata={"domain": self._domain},
+        )
+        item_mapping = _ensure_mapping(
+            self._item_mapping_path,
+            combined_items.tolist(),
+            encoded_col="item_id",
+            raw_col="raw_item_id",
+            extra_metadata={"domain": self._domain},
+        )
 
-        return num_unique_items
+        self._expected_num_unique_items = len(item_mapping)
+        self._expected_max_item_id = max(item_mapping.values()) if item_mapping else None
+
+        target_frame = filtered_ratings if self._subset == "ratings" else serenlens
+        encoded = self._encode_for_sequences(target_frame, user_mapping, item_mapping)
+        extra_cols = ["label"] if "label" in target_frame.columns else None
+        sequences = _sequence_frame(
+            encoded,
+            user_col="user_id",
+            item_col="item_id",
+            rating_col="rating",
+            timestamp_col="timestamp",
+            min_length=self._min_sequence_length,
+            extra_cols=extra_cols,
+        )
+        seq_map = {"label": "sequence_labels"} if extra_cols else None
+        sasrec_ready = self.to_seq_data(sequences, sequence_columns=seq_map)
+        sasrec_ready.to_csv(self.output_format_csv(), index=False)
+
+        raw_sequences = _sequence_frame(
+            target_frame,
+            user_col="user_raw",
+            item_col="item_raw",
+            rating_col="rating",
+            timestamp_col="timestamp",
+            min_length=self._min_sequence_length,
+            extra_cols=extra_cols,
+        )
+        raw_seq_map = {"label": "sequence_labels"} if extra_cols else None
+        raw_ready = self.to_seq_data(raw_sequences, sequence_columns=raw_seq_map)
+        rename_map = {
+            "user_id": "raw_user_id",
+            "sequence_item_ids": "raw_sequence_item_ids",
+            "sequence_ratings": "raw_sequence_ratings",
+            "sequence_timestamps": "raw_sequence_timestamps",
+        }
+        if raw_seq_map and "sequence_labels" in raw_ready.columns:
+            rename_map["sequence_labels"] = "raw_sequence_labels"
+        raw_ready.rename(columns=rename_map, inplace=True)
+        raw_ready.to_csv(self.raw_output_format_csv(), index=False)
+
+        self.outputs = {
+            "sasrec": self.output_format_csv(),
+            "user_mapping": str(self._user_mapping_path),
+            "item_mapping": str(self._item_mapping_path),
+            "sasrec_raw": self.raw_output_format_csv(),
+        }
+        return self._expected_num_unique_items or 0
+
+    def _encode_for_sequences(
+        self,
+        frame: pd.DataFrame,
+        user_mapping: Mapping[str, int],
+        item_mapping: Mapping[str, int],
+    ) -> pd.DataFrame:
+        data = frame.copy()
+        data["user_raw"] = data["user_raw"].astype(str)
+        data["item_raw"] = data["item_raw"].astype(str)
+        data["user_id"] = data["user_raw"].map(user_mapping)
+        data["item_id"] = data["item_raw"].map(item_mapping)
+        missing_mask = data["user_id"].isna() | data["item_id"].isna()
+        if missing_mask.any():
+            dropped = int(missing_mask.sum())
+            log.warning(
+                "%s/%s: dropping %s rows with unmapped IDs",
+                self._domain,
+                self._subset,
+                dropped,
+            )
+            data = data.loc[~missing_mask]
+        data["user_id"] = data["user_id"].astype(int)
+        data["item_id"] = data["item_id"].astype(int)
+        data["rating"] = pd.to_numeric(data["rating"], errors="coerce").fillna(0.0)
+        data["timestamp"] = (
+            pd.to_numeric(data["timestamp"], errors="coerce").fillna(0).astype(int)
+        )
+        return data[["user_id", "item_id", "rating", "timestamp"]]
+
+
+class Serendipity2018DataProcessor(DataProcessor):
+    """Preprocess Serendipity 2018 challenge data into SASRec format."""
+
+    def __init__(
+        self,
+        subset: str,
+        *,
+        root: str | Path = DEFAULT_ROOT,
+        min_sequence_length: int = 1,
+    ) -> None:
+        subset_key = subset.lower()
+        if subset_key not in SERENDIPITY2018_SUBSETS:
+            raise ValueError(
+                f"Unsupported subset '{subset}'. Choose from {list(SERENDIPITY2018_SUBSETS)}"
+            )
+        prefix = f"sac2018-{subset_key}"
+        super().__init__(prefix, expected_num_unique_items=None, expected_max_item_id=None)
+        self._subset = subset_key
+        self._root = Path(root)
+        self._min_sequence_length = min_sequence_length
+        self._output_root = self._root / "serendipity-aware" / "sac2018"
+        self._output_root.mkdir(parents=True, exist_ok=True)
+        self._mapping_dir = self._output_root / "mappings"
+        self._user_mapping_path = self._mapping_dir / "user_mapping.csv"
+        self._item_mapping_path = self._mapping_dir / "item_mapping.csv"
+        self._output_path = self._output_root / f"{subset_key}_sasrec.csv"
+        self._raw_output_path = self._output_root / f"{subset_key}_sasrec_raw.csv"
+        self.outputs: Dict[str, str] = {}
+
+    def _load_mapping_stats(self) -> None:
+        if self._expected_num_unique_items is not None and self._expected_max_item_id is not None:
+            return
+        if not self._item_mapping_path.exists():
+            return
+        mapping_df = pd.read_csv(self._item_mapping_path)
+        if "item_id" not in mapping_df.columns:
+            return
+        self._expected_num_unique_items = int(mapping_df["item_id"].nunique())
+        self._expected_max_item_id = int(mapping_df["item_id"].max())
+
+    def expected_num_unique_items(self) -> Optional[int]:
+        self._load_mapping_stats()
+        return self._expected_num_unique_items
+
+    def expected_max_item_id(self) -> Optional[int]:
+        self._load_mapping_stats()
+        return self._expected_max_item_id
+
+    def processed_item_csv(self) -> str:
+        return str(self._item_mapping_path)
+
+    def output_format_csv(self) -> str:
+        return str(self._output_path)
+
+    def raw_output_format_csv(self) -> str:
+        return str(self._raw_output_path)
+
+    def preprocess_rating(self) -> int:
+        download_dataset("serendipity-2018", root=self._root)
+        dataset_root = self._root / "serendipity-2018"
+
+        subset_frames: Dict[str, pd.DataFrame] = {}
+        for subset_key, filename in SERENDIPITY2018_SUBSETS.items():
+            file_path = self._locate_dataset_file(dataset_root, filename)
+            subset_frames[subset_key] = self._normalize_subset(pd.read_csv(file_path))
+
+        combined_users = pd.concat(
+            [frame["user_raw"] for frame in subset_frames.values()], ignore_index=True
+        )
+        combined_items = pd.concat(
+            [frame["item_raw"] for frame in subset_frames.values()], ignore_index=True
+        )
+
+        user_mapping = _ensure_mapping(
+            self._user_mapping_path,
+            combined_users.tolist(),
+            encoded_col="user_id",
+            raw_col="raw_user_id",
+            extra_metadata={"dataset": "serendipity-2018"},
+        )
+        item_mapping = _ensure_mapping(
+            self._item_mapping_path,
+            combined_items.tolist(),
+            encoded_col="item_id",
+            raw_col="raw_item_id",
+            extra_metadata={"dataset": "serendipity-2018"},
+        )
+
+        self._expected_num_unique_items = len(item_mapping)
+        self._expected_max_item_id = max(item_mapping.values()) if item_mapping else None
+
+        target_frame = subset_frames[self._subset]
+        encoded = self._encode_for_sequences(target_frame, user_mapping, item_mapping)
+        sequences = _sequence_frame(
+            encoded,
+            user_col="user_id",
+            item_col="item_id",
+            rating_col="rating",
+            timestamp_col="timestamp",
+            min_length=self._min_sequence_length,
+        )
+        sasrec_ready = self.to_seq_data(sequences)
+        sasrec_ready.to_csv(self.output_format_csv(), index=False)
+
+        raw_sequences = _sequence_frame(
+            target_frame,
+            user_col="user_raw",
+            item_col="item_raw",
+            rating_col="rating",
+            timestamp_col="timestamp",
+            min_length=self._min_sequence_length,
+        )
+        raw_ready = self.to_seq_data(raw_sequences)
+        raw_ready.rename(
+            columns={
+                "user_id": "raw_user_id",
+                "sequence_item_ids": "raw_sequence_item_ids",
+                "sequence_ratings": "raw_sequence_ratings",
+                "sequence_timestamps": "raw_sequence_timestamps",
+            },
+            inplace=True,
+        )
+        raw_ready.to_csv(self.raw_output_format_csv(), index=False)
+
+        self.outputs = {
+            "sasrec": self.output_format_csv(),
+            "user_mapping": str(self._user_mapping_path),
+            "item_mapping": str(self._item_mapping_path),
+            "sasrec_raw": self.raw_output_format_csv(),
+        }
+        return self._expected_num_unique_items or 0
+
+    def _locate_dataset_file(self, root: Path, filename: str) -> Path:
+        candidates = list(root.rglob(filename))
+        if not candidates:
+            raise FileNotFoundError(f"Could not find {filename} inside {root}")
+        return candidates[0]
+
+    def _normalize_subset(self, frame: pd.DataFrame) -> pd.DataFrame:
+        user_col = _resolve_column(frame.columns, ["user", "uid"])
+        item_col = _resolve_column(frame.columns, ["item", "movie", "iid", "sid"])
+        rating_col = _resolve_column(frame.columns, ["rating", "score", "value", "relevance"])
+        timestamp_col = _resolve_column(frame.columns, ["timestamp", "time", "unix"])
+        if not user_col or not item_col:
+            raise ValueError("Subset does not contain identifiable user/item columns")
+
+        normalized = pd.DataFrame()
+        normalized["user_raw"] = frame[user_col].astype(str)
+        normalized["item_raw"] = frame[item_col].astype(str)
+        if rating_col:
+            normalized["rating"] = pd.to_numeric(frame[rating_col], errors="coerce").fillna(0.0)
+        else:
+            normalized["rating"] = 1.0
+        if timestamp_col:
+            timestamps = pd.to_numeric(frame[timestamp_col], errors="coerce")
+            normalized["timestamp"] = timestamps
+        else:
+            normalized["timestamp"] = pd.NA
+        normalized["timestamp"] = normalized.groupby("user_raw", sort=False)["timestamp"].apply(
+            lambda col: col.fillna(pd.RangeIndex(len(col)))
+        )
+        normalized["timestamp"] = normalized["timestamp"].astype(int)
+        return normalized[["user_raw", "item_raw", "rating", "timestamp"]]
+
+    def _encode_for_sequences(
+        self,
+        frame: pd.DataFrame,
+        user_mapping: Mapping[str, int],
+        item_mapping: Mapping[str, int],
+    ) -> pd.DataFrame:
+        data = frame.copy()
+        data["user_id"] = data["user_raw"].map(user_mapping)
+        data["item_id"] = data["item_raw"].map(item_mapping)
+        missing_mask = data["user_id"].isna() | data["item_id"].isna()
+        if missing_mask.any():
+            dropped = int(missing_mask.sum())
+            log.warning("sac2018-%s: dropping %s rows with unmapped IDs", self._subset, dropped)
+            data = data.loc[~missing_mask]
+        data["user_id"] = data["user_id"].astype(int)
+        data["item_id"] = data["item_id"].astype(int)
+        data["rating"] = pd.to_numeric(data["rating"], errors="coerce").fillna(0.0)
+        data["timestamp"] = pd.to_numeric(data["timestamp"], errors="coerce").fillna(0).astype(int)
+        return data[["user_id", "item_id", "rating", "timestamp"]]
+
+
+class SerendipityAllDataProcessor(DataProcessor):
+    """Utility preprocessor that orchestrates all serendipity-aware datasets."""
+
+    def __init__(self, *, root: str | Path = DEFAULT_ROOT, min_sequence_length: int = 1) -> None:
+        super().__init__("serendipity-all", expected_num_unique_items=None, expected_max_item_id=None)
+        self._root = Path(root)
+        self._min_sequence_length = min_sequence_length
+        self._output_path = self._root / "serendipity-all" / "summary.csv"
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._processors = [
+            SerendipityAmazonDataProcessor(
+                "books",
+                "serenlens",
+                root=self._root,
+                min_sequence_length=self._min_sequence_length,
+            ),
+            SerendipityAmazonDataProcessor(
+                "movies",
+                "serenlens",
+                root=self._root,
+                min_sequence_length=self._min_sequence_length,
+            ),
+            Serendipity2018DataProcessor(
+                "train",
+                root=self._root,
+                min_sequence_length=self._min_sequence_length,
+            ),
+            Serendipity2018DataProcessor(
+                "answers",
+                root=self._root,
+                min_sequence_length=self._min_sequence_length,
+            ),
+        ]
+        self.outputs: Dict[str, Dict[str, str]] = {}
+
+    def expected_num_unique_items(self) -> Optional[int]:
+        return None
+
+    def expected_max_item_id(self) -> Optional[int]:
+        return None
+
+    def processed_item_csv(self) -> str:
+        return str(self._output_path)
+
+    def output_format_csv(self) -> str:
+        return str(self._output_path)
+
+    def preprocess_rating(self) -> int:
+        summary_rows = []
+        total_items = 0
+        for processor in self._processors:
+            log.info("Running preprocessor for %s", processor.output_format_csv())
+            num_items = processor.preprocess_rating()
+            total_items += num_items
+            outputs = getattr(processor, "outputs", {})
+            if outputs:
+                self.outputs[processor._prefix] = outputs  # type: ignore[assignment]
+            summary_rows.append(
+                {
+                    "prefix": processor._prefix,
+                    "sasrec_path": outputs.get("sasrec", processor.output_format_csv()),
+                    "sasrec_raw_path": outputs.get("sasrec_raw", ""),
+                    "user_mapping_path": outputs.get("user_mapping", ""),
+                    "item_mapping_path": outputs.get("item_mapping", processor.processed_item_csv()),
+                    "num_items": num_items,
+                }
+            )
+        summary_frame = pd.DataFrame(summary_rows)
+        summary_frame.to_csv(self._output_path, index=False)
+        self.outputs["summary"] = {"summary_path": str(self._output_path)}
+        log.info("Completed preprocessing for all datasets. Summary saved to %s", self._output_path)
+        return total_items
