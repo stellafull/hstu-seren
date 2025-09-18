@@ -19,5 +19,8 @@ eval: ## Evaluate the model
 predict: ## Predict the model
 	python src/generative_recommenders_pl/scripts/predict.py $(MAKEOVERRIDES)
 
+download_data: ## Download raw datasets
+	python src/generative_recommenders_pl/scripts/download.py
+
 prepare_data: ## Prepare data
 	python src/generative_recommenders_pl/scripts/prepare_data.py $(MAKEOVERRIDES)
