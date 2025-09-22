@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_infer
+
+infer_cfg: null
+
+inference:
+  embeddings:
+    - path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+      dtype: float16
+  quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/quantizer.pt
+  output_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/inference_semantic_ids.pt
+  normalize_residuals: null
+  device: null
+  chunk_size: 65536
+  dedup_slot_cardinality: 256
+  storage_dtype: null
+  compute_dtype: null
+  overwrite: false

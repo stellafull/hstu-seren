@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_pipeline
+
+pipeline_cfg: null
+
+pipeline:
+  embeddings:
+    - embedding/emb_all
+  trainings: training/sid_train_all
+  inference: inference/sid_infer_all

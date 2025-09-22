@@ -1,0 +1,33 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_train
+
+train_cfg: null
+
+training:
+  embeddings:
+    - path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+      dtype: float16
+  output:
+    quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/quantizer.pt
+    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/semantic_ids.pt
+    overwrite: false
+  quantizer:
+    num_hierarchies: 3
+    codebook_width: 256
+    chunk_size: 65536
+    max_iterations: 20
+    tolerance: 1e-4
+    normalize_residuals: true
+    device: null
+    use_mini_batch: true
+    mini_batch_size: 65536
+    shuffle_mini_batches: true
+    storage_dtype: float16
+    compute_dtype: float32
+  seed: 42

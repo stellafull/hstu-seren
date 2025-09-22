@@ -24,3 +24,16 @@ download_data: ## Download raw datasets
 
 prepare_data: ## Prepare data
 	python src/generative_recommenders_pl/scripts/prepare_data.py $(MAKEOVERRIDES)
+
+# Semantic ID two-stage workflow
+semantic_id_embed: ## Generate item embeddings (Hydra config in configs/semantic_id/embedding)
+	python src/generative_recommenders_pl/scripts/semantic_id_embed.py $(MAKEOVERRIDES)
+
+semantic_id_train: ## Train residual quantizer (Hydra config in configs/semantic_id/training)
+	python src/generative_recommenders_pl/scripts/semantic_id_train.py $(MAKEOVERRIDES)
+
+semantic_id_infer: ## Run semantic ID inference (Hydra config in configs/semantic_id/inference)
+	python src/generative_recommenders_pl/scripts/semantic_id_infer.py $(MAKEOVERRIDES)
+
+semantic_id_pipeline: ## Run full embedding→training→inference pipeline
+	python src/generative_recommenders_pl/scripts/semantic_id_pipeline.py $(MAKEOVERRIDES)

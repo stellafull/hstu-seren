@@ -1,0 +1,37 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_embed
+
+embed_cfg: null
+
+embedding:
+  dataset:
+    name: amazon-movies
+    type: amazon_meta
+    input_path: ${paths.root_dir}/tmp/amzn_mv_2015/meta_Movies_and_TV.json
+  datasets: []
+  model:
+    name: Qwen/Qwen3-Embedding-8B
+    batch_size: 32
+    device: null
+    normalize: true
+    trust_remote_code: true
+    use_flash_attention: true
+    use_fp16: true
+    padding_side: left
+    truncate_dim: 2048
+    storage_dtype: float16
+    compute_dtype: float16
+  output:
+    path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/embeddings.parquet
+    max_items_per_file: 500000
+    format: parquet
+    resume: true
+    overwrite: false
+
+seed: 42
