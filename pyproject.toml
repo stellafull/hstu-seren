@@ -58,6 +58,8 @@ dependencies = [
     "zipp>=3.23.0",
     "sentence-transformers",
     "transformers",
+    "flash-attn<2.8.0",
+    "pyarrow>=21.0.0",
 ]
 classifiers = [
     "Intended Audience :: Developers",
@@ -75,6 +77,13 @@ classifiers = [
 Homepage = "https://stellafull.github.io/hstu-seren/"
 Repository = "https://github.com/stellafull/hstu-seren"
 Documentation = "https://stellafull.github.io/hstu-seren/"
+
+[tool.uv.extra-build-dependencies]
+# build flash-attention 2
+flash-attn = [
+  { requirement = "torch", match-runtime = true },
+  "ninja"
+]
 
 [project.optional-dependencies]
 cu124 = [
@@ -110,7 +119,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hstu_seren"]
+packages = ["src/generative_recommenders_pl"]
 
 [tool.mypy]
 files = ["src"]

@@ -1,0 +1,15 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_embed
+
+embed_cfg: null
+
+refs:
+  - embedding/emb_serendipity_2018
+  - embedding/emb_amazon_books
+  - embedding/emb_amazon_movies

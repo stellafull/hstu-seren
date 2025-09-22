@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_infer
+
+infer_cfg: null
+
+refs:
+  - inference/sid_infer_serendipity_2018
+  - inference/sid_infer_amazon_books
+  - inference/sid_infer_amazon_movies
+  - inference/sid_infer_joint

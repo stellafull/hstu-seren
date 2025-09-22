@@ -1,0 +1,36 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_embed
+
+embed_cfg: null
+
+embedding:
+  dataset:
+    name: serendipity-2018
+    type: serendipity_movies
+    input_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/movies.csv
+  datasets: []
+  model:
+    name: Qwen/Qwen3-Embedding-8B
+    batch_size: 128
+    device: null
+    normalize: true
+    trust_remote_code: true
+    use_flash_attention: true
+    use_fp16: true
+    padding_side: left
+    truncate_dim: 2048
+    storage_dtype: float16
+    compute_dtype: float16
+  output:
+    path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+    format: parquet
+    resume: true
+    overwrite: false
+
+seed: 42

@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - /hydra: default
+  - /paths: default
+  - _self_
+
+task_name: semantic_id_train
+train_cfg: null
+
+
+refs:
+  - training/sid_train_serendipity_2018
+  - training/sid_train_amazon_books
+  - training/sid_train_amazon_movies
+  - training/sid_train_joint
