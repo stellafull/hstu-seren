@@ -11,13 +11,13 @@ infer_cfg: null
 
 inference:
   embeddings:
-    - path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+    - path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/embeddings.parquet
       dtype: float16
       id_prefix: "seren::"
-    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon-books/embeddings_part*.parquet
+    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon_books/embeddings_part*.parquet
       dtype: float16
       id_prefix: "amzn_books::"
-    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon-movies/embeddings_part*.parquet
+    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon_movies/embeddings_part*.parquet
       dtype: float16
       id_prefix: "amzn_movies::"
   quantizer_path: ${paths.root_dir}/tmp/semantic_id/joint/quantizer.pt
