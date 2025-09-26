@@ -11,11 +11,11 @@ train_cfg: null
 
 training:
   embeddings:
-    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon-books/embeddings_part*.parquet
+    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon_books/embeddings_part*.parquet
       dtype: float16
   output:
-    quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon-books/quantizer.pt
-    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/amazon-books/semantic_ids.pt
+    quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon_books/quantizer.pt
+    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/amazon_books/semantic_ids.pt
     overwrite: false
   quantizer:
     num_hierarchies: 4

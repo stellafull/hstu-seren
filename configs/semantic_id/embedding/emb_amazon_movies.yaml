@@ -28,7 +28,7 @@ embedding:
     storage_dtype: float16
     compute_dtype: float16
   output:
-    path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/embeddings.parquet
+    path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/embeddings.parquet
     max_items_per_file: 500000
     format: parquet
     resume: true

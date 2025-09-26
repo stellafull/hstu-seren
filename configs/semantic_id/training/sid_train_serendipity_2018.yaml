@@ -11,11 +11,11 @@ train_cfg: null
 
 training:
   embeddings:
-    - path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+    - path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/embeddings.parquet
       dtype: float16
   output:
-    quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/quantizer.pt
-    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/semantic_ids.pt
+    quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/quantizer.pt
+    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/semantic_ids.pt
     overwrite: false
   quantizer:
     num_hierarchies: 3

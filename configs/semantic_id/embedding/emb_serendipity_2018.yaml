@@ -28,7 +28,7 @@ embedding:
     storage_dtype: float16
     compute_dtype: float16
   output:
-    path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+    path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/embeddings.parquet
     format: parquet
     resume: true
     overwrite: false

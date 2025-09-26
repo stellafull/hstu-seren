@@ -11,11 +11,11 @@ train_cfg: null
 
 training:
   embeddings:
-    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon-movies/embeddings_part*.parquet
+    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon_movies/embeddings_part*.parquet
       dtype: float16
   output:
-    quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/quantizer.pt
-    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/semantic_ids.pt
+    quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/quantizer.pt
+    semantic_ids_path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/semantic_ids.pt
     overwrite: false
   quantizer:
     num_hierarchies: 3

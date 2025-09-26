@@ -11,10 +11,10 @@ infer_cfg: null
 
 inference:
   embeddings:
-    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon-movies/embeddings_part*.parquet
+    - path_glob: ${paths.root_dir}/tmp/semantic_id/amazon_movies/embeddings_part*.parquet
       dtype: float16
-  quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/quantizer.pt
-  output_path: ${paths.root_dir}/tmp/semantic_id/amazon-movies/inference_semantic_ids.pt
+  quantizer_path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/quantizer.pt
+  output_path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/inference_semantic_ids.pt
   normalize_residuals: null
   device: null
   chunk_size: 65536

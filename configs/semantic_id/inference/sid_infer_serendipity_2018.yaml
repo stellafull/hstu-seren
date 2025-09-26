@@ -11,10 +11,10 @@ infer_cfg: null
 
 inference:
   embeddings:
-    - path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/embeddings.parquet
+    - path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/embeddings.parquet
       dtype: float16
-  quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/quantizer.pt
-  output_path: ${paths.root_dir}/tmp/semantic_id/serendipity-2018/inference_semantic_ids.pt
+  quantizer_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/quantizer.pt
+  output_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/inference_semantic_ids.pt
   normalize_residuals: null
   device: null
   chunk_size: 65536
