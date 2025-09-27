@@ -27,28 +27,28 @@ This repository aims to replicate the [Generative Recommenders](https://github.c
 - **Hardware Agnostic**: The dependency on NVIDIA GPUs has been removed, enabling you to run the scripts on any device, including local machines for training, evaluation, and debugging.
 - **Improved Readability**: The code has been significantly refactored for clarity. The Generative Recommenders module is now divided into four major components: embeddings, preprocessor, sequence encoder, and postprocessor, making the training and evaluation processes more transparent.
 
+## Env
+
+A100 40G, CUDA 12.4, Ubuntu 22.04
+
 ## Installation
 
 It is recommended to use `uv` to install the library:
 
 ```bash
-uv venv -p 3.10 && source .venv/bin/activate
-uv pip install --extra dev --extra test -r pyproject.toml
-uv pip install -e . --no-deps
-```
-
-For Linux systems with GPU support, you can also install `fbgemm-gpu` to enhance performance:
-
-```bash
-uv pip install fbgemm-gpu==0.7.0
+uv venv -p 3.12 && source .venv/bin/activate
+uv sync --extra=cu124
 ```
 
 ## How to Run
 
-Prepare dataset based on config.
+Prepare dataset based on configs/data, first build pre-train dataset, then build tuning dataset
+
+example:
 
 ```bash
-make prepare_data data=ml-1m
+make prepare_data data=amazon_books
+make prepare_data data=serenlens_books
 ```
 
 Train the Model with Default Configuration
