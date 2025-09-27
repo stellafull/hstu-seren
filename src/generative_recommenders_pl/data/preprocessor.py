@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import pandas as pd
 
@@ -51,6 +51,7 @@ def _ensure_lookup_series(
     normalized_col: str,
     original_col: str,
     initial_entries: Iterable[str] | None = None,
+    key_normalizer: Callable[[str], str] | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Map values to integer ids, updating the lookup file in-place if needed."""
 
@@ -62,28 +63,51 @@ def _ensure_lookup_series(
     else:
         lookup = pd.DataFrame(columns=[normalized_col, original_col])
 
-    mapping = dict(zip(lookup[original_col], lookup[normalized_col]))
-    next_id = int(max(mapping.values())) + 1 if mapping else 0
+    def _normalize_key(raw_key: str) -> str:
+        return key_normalizer(raw_key) if key_normalizer else raw_key
+
+    existing_original = lookup[original_col].astype("object").map(str)
+    existing_normalized = existing_original.map(_normalize_key)
+    mapping: dict[str, int] = dict(
+        zip(existing_normalized, lookup[normalized_col].astype("int64"))
+    )
+
+    next_id = int(lookup[normalized_col].max()) + 1 if not lookup.empty else 0
     updated = False
 
-    def _ensure_entry(key: str) -> int:
-        nonlocal next_id, updated
-        if key in mapping:
-            return int(mapping[key])
-        idx = next_id
-        next_id += 1
-        mapping[key] = idx
-        lookup.loc[len(lookup)] = {normalized_col: idx, original_col: key}
+    def _add_entries(raw_series: pd.Series) -> None:
+        nonlocal next_id, updated, lookup, mapping
+        if raw_series.empty:
+            return
+        raw_series = raw_series.astype("object")
+        normalized_series = raw_series.map(_normalize_key) if key_normalizer else raw_series
+        mask = ~normalized_series.isin(mapping)
+        if not mask.any():
+            return
+        new_normalized = normalized_series.loc[mask].drop_duplicates(keep="first")
+        new_original = raw_series.loc[new_normalized.index].map(str)
+        new_ids = range(next_id, next_id + len(new_normalized))
+        next_id += len(new_normalized)
+        mapping.update(zip(new_normalized.values, new_ids))
+        new_lookup_rows = pd.DataFrame(
+            {normalized_col: list(new_ids), original_col: new_original.values}
+        )
+        lookup = pd.concat([lookup, new_lookup_rows], ignore_index=True)
         updated = True
-        return idx
 
     if initial_entries is not None:
-        for entry in initial_entries:
-            _ensure_entry(str(entry))
+        initial_series = pd.Series(list(initial_entries), dtype="object").map(str)
+        _add_entries(initial_series)
 
-    normalized_values = [
-        _ensure_entry(str(value)) for value in values.astype("object")
-    ]
+    value_series = values.astype("object").map(str)
+    _add_entries(value_series)
+
+    normalized_series = (
+        value_series.map(_normalize_key)
+        if key_normalizer is not None
+        else value_series
+    )
+    normalized_values = normalized_series.map(mapping).astype("int64")
 
     if updated or not lookup_path.exists():
         lookup[normalized_col] = lookup[normalized_col].astype(int)
@@ -92,7 +116,7 @@ def _ensure_lookup_series(
         lookup.reset_index(drop=True, inplace=True)
         lookup.to_csv(lookup_path, index=False)
 
-    return pd.Series(normalized_values, dtype="int64"), lookup
+    return normalized_values, lookup
 
 
 def _build_sequence_frame(
@@ -146,6 +170,111 @@ def _build_sequence_frame(
     return seq_df, lengths
 
 
+def _apply_ser_loo(
+    sequences: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.Series, dict[str, int]]:
+    """Trim user sequences so the last interaction is the most recent ser=1."""
+
+    if "sequence_ser_label" not in sequences.columns:
+        raise ValueError("Ser-LOO requires a sequence_ser_label column in sequences")
+
+    sequence_columns = [col for col in sequences.columns if col.startswith("sequence_")]
+    kept_rows: list[pd.Series] = []
+    ser_lengths: list[int] = []
+    dropped_users = 0
+    truncated_users = 0
+
+    def _split_sequence(raw: str) -> list[str]:
+        if pd.isna(raw) or raw == "":
+            return []
+        return str(raw).split(",")
+
+    def _is_ser_positive(token: str) -> bool:
+        normalized = token.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"1", "true", "t", "yes"}:
+            return True
+        try:
+            return float(normalized) == 1.0
+        except ValueError:
+            return False
+
+    for _, row in sequences.iterrows():
+        ser_labels = _split_sequence(row["sequence_ser_label"])
+        ser_index = None
+        for idx in range(len(ser_labels) - 1, -1, -1):
+            if _is_ser_positive(ser_labels[idx]):
+                ser_index = idx
+                break
+        if ser_index is None:
+            dropped_users += 1
+            continue
+
+        trim_length = ser_index + 1
+        truncated = len(ser_labels) > trim_length
+
+        new_row = row.copy()
+        for column in sequence_columns:
+            values = _split_sequence(row[column])
+            if len(values) < trim_length:
+                raise ValueError(
+                    "Sequence columns have mismatched lengths for user"
+                )
+            trimmed_values = values[:trim_length]
+            new_row[column] = ",".join(trimmed_values)
+
+        kept_rows.append(new_row)
+        ser_lengths.append(trim_length)
+        if truncated:
+            truncated_users += 1
+
+    if kept_rows:
+        trimmed_sequences = pd.DataFrame(kept_rows).reset_index(drop=True)
+        lengths = pd.Series(ser_lengths, dtype="int64")
+    else:
+        trimmed_sequences = pd.DataFrame(columns=sequences.columns)
+        lengths = pd.Series(dtype="int64")
+    stats = {"dropped": dropped_users, "truncated": truncated_users}
+    return trimmed_sequences, lengths, stats
+
+
+def _enforce_ser_loo_alignment(
+    ratings: pd.DataFrame,
+    sequences: pd.DataFrame,
+    *,
+    min_length: int = 1,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, dict[str, int]]:
+    trimmed_sequences, lengths, stats = _apply_ser_loo(sequences)
+
+    if trimmed_sequences.empty:
+        empty_ratings = ratings.iloc[0:0].reset_index(drop=True)
+        return empty_ratings, trimmed_sequences, lengths, stats
+
+    if min_length > 1 and not lengths.empty:
+        mask = lengths >= min_length
+        if not mask.all():
+            removed = int((~mask).sum())
+            stats["length_filtered"] = stats.get("length_filtered", 0) + removed
+        trimmed_sequences = trimmed_sequences.loc[mask].reset_index(drop=True)
+        lengths = lengths.loc[mask].reset_index(drop=True)
+        if trimmed_sequences.empty:
+            empty_ratings = ratings.iloc[0:0].reset_index(drop=True)
+            return empty_ratings, trimmed_sequences, lengths, stats
+
+    keep_map = dict(zip(trimmed_sequences["user_id"], lengths))
+    ratings_sorted = ratings.sort_values(by=["user_id", "timestamp"])
+    ratings_sorted["_ser_rank"] = ratings_sorted.groupby("user_id").cumcount() + 1
+    ratings_filtered = ratings_sorted[ratings_sorted["user_id"].isin(keep_map)]
+    ratings_filtered = ratings_filtered[
+        ratings_filtered["_ser_rank"] <= ratings_filtered["user_id"].map(keep_map)
+    ]
+    ratings_filtered = ratings_filtered.drop(columns="_ser_rank")
+    ratings_filtered.reset_index(drop=True, inplace=True)
+
+    return ratings_filtered, trimmed_sequences, lengths, stats
+
+
 class DataProcessor(abc.ABC):
     """Base preprocessor that materializes SASRec-style sequential data."""
 
@@ -163,6 +292,7 @@ class DataProcessor(abc.ABC):
         self._expected_max_item_id = expected_max_item_id
         self._output_root = Path(output_root) if output_root is not None else DEFAULT_PRETRAIN_ROOT
         self._lookup_root = Path(lookup_root) if lookup_root is not None else self._output_root
+        self._apply_ser_loo = False
         self._output_root.mkdir(parents=True, exist_ok=True)
         self._lookup_root.mkdir(parents=True, exist_ok=True)
 
@@ -211,6 +341,7 @@ class MovielensDataProcessor(DataProcessor):
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
         extra_sequence_columns: Optional[dict[str, str]] = None,
+        apply_ser_loo: bool = False,
     ) -> None:
         super().__init__(
             prefix,
@@ -223,9 +354,16 @@ class MovielensDataProcessor(DataProcessor):
         self._movies_path = Path(movies_path) if movies_path else None
         self._min_sequence_length = max(1, min_sequence_length)
         self._extra_sequence_columns = extra_sequence_columns or {}
+        self._apply_ser_loo = apply_ser_loo
 
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         return ratings
+
+    def _user_lookup_initial_entries(self) -> Iterable[str] | None:
+        return None
+
+    def _item_lookup_initial_entries(self) -> Iterable[str] | None:
+        return _read_movie_ids(self._movies_path) if self._movies_path else None
 
     def preprocess_rating(self) -> int:
         if not self._ratings_path.exists():
@@ -259,21 +397,25 @@ class MovielensDataProcessor(DataProcessor):
         ratings["rating"] = ratings["rating"].astype(float)
         ratings["timestamp"] = ratings["timestamp"].astype("int64")
 
+        initial_user_entries = self._user_lookup_initial_entries()
         user_ids, user_lookup = _ensure_lookup_series(
             ratings["user_id"],
             Path(self.user_lookup_csv()),
             normalized_col="normalized_user_id",
             original_col="original_user_id",
+            initial_entries=initial_user_entries,
+            key_normalizer=str.casefold,
         )
         ratings["user_id"] = user_ids
 
-        initial_movie_ids = _read_movie_ids(self._movies_path) if self._movies_path else None
+        initial_movie_ids = self._item_lookup_initial_entries()
         item_ids, item_lookup = _ensure_lookup_series(
             ratings["item_id"],
             Path(self.item_lookup_csv()),
             normalized_col="normalized_item_id",
             original_col="original_item_id",
             initial_entries=initial_movie_ids,
+            key_normalizer=str.casefold,
         )
         ratings["item_id"] = item_ids
 
@@ -288,6 +430,32 @@ class MovielensDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns=self._extra_sequence_columns,
         )
+        if self._apply_ser_loo and not seq_df.empty:
+            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
+                ratings,
+                seq_df,
+                min_length=self._min_sequence_length,
+            )
+            if ser_stats["dropped"]:
+                log.info(
+                    "%s Ser-LOO removed %s users without ser interactions",
+                    self._prefix,
+                    ser_stats["dropped"],
+                )
+            if ser_stats["truncated"]:
+                log.info(
+                    "%s Ser-LOO truncated post-ser interactions for %s users",
+                    self._prefix,
+                    ser_stats["truncated"],
+                )
+            length_filtered = ser_stats.get("length_filtered", 0)
+            if length_filtered:
+                log.info(
+                    "%s Ser-LOO dropped %s users below min_length=%s",
+                    self._prefix,
+                    length_filtered,
+                    self._min_sequence_length,
+                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",
@@ -324,6 +492,7 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         prefix: str = "serendipity-2018-answers",
         *,
         movies_path: str | Path | None = None,
+        training_path: str | Path | None = None,
         min_sequence_length: int = 1,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
@@ -337,6 +506,12 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             "m_ser_imp",
             "m_ser_rec",
         ]
+        if training_path is None:
+            raise ValueError(
+                "SerendipityAnswersDataProcessor requires a training_path to build user lookups"
+            )
+        self._training_path = Path(training_path)
+        self._cached_training_user_ids: list[str] | None = None
         super().__init__(
             ratings_path,
             prefix,
@@ -345,7 +520,46 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             output_root=output_root,
             lookup_root=lookup_root,
             extra_sequence_columns={"ser_label": "sequence_ser_label"},
+            apply_ser_loo=True,
         )
+
+    def _user_lookup_initial_entries(self) -> Iterable[str] | None:
+        if self._cached_training_user_ids is not None:
+            return self._cached_training_user_ids
+        if not self._training_path.exists():
+            raise FileNotFoundError(
+                f"Training file not found for Serendipity answers preprocessing: {self._training_path}"
+            )
+        try:
+            training_users = pd.read_csv(
+                self._training_path,
+                usecols=["userId"],
+            )
+            column_name = "userId"
+        except ValueError:
+            try:
+                training_users = pd.read_csv(
+                    self._training_path,
+                    usecols=["user_id"],
+                )
+                column_name = "user_id"
+            except ValueError as secondary_exc:
+                raise ValueError(
+                    "Training file for Serendipity answers must contain a userId column"
+                ) from secondary_exc
+            else:
+                log.warning(
+                    "userId column missing from %s, using user_id instead",
+                    self._training_path,
+                )
+        training_users[column_name] = training_users[column_name].astype(str)
+        self._cached_training_user_ids = (
+            training_users[column_name]
+            .dropna()
+            .drop_duplicates()
+            .tolist()
+        )
+        return self._cached_training_user_ids
 
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         missing = [col for col in self._ser_columns if col not in ratings.columns]
@@ -412,12 +626,26 @@ class AmazonDataProcessor(DataProcessor):
 
         initial_rows = ratings.shape[0]
 
-        serenlens_pairs = serenlens.drop_duplicates()
+        ratings["_normalized_user_id"] = ratings["user_id"].str.casefold()
+        ratings["_normalized_item_id"] = ratings["item_id"].str.casefold()
+
+        serenlens_pairs = serenlens.copy()
+        serenlens_pairs["_normalized_user_id"] = (
+            serenlens_pairs["user_id"].str.casefold()
+        )
+        serenlens_pairs["_normalized_item_id"] = (
+            serenlens_pairs["item_id"].str.casefold()
+        )
+        serenlens_pairs = serenlens_pairs.drop_duplicates(
+            subset=["_normalized_user_id", "_normalized_item_id"]
+        )
         serenlens_pairs["_serenlens"] = True
         ratings = ratings.merge(
-            serenlens_pairs,
+            serenlens_pairs[
+                ["_normalized_user_id", "_normalized_item_id", "_serenlens"]
+            ],
             how="left",
-            on=["user_id", "item_id"],
+            on=["_normalized_user_id", "_normalized_item_id"],
         )
         leak_rows = ratings["_serenlens"].fillna(False).sum()
         if leak_rows:
@@ -429,6 +657,7 @@ class AmazonDataProcessor(DataProcessor):
                 initial_rows - int(leak_rows),
             )
         ratings = ratings[ratings["_serenlens"].isna()].drop(columns="_serenlens")
+        ratings.drop(columns=["_normalized_user_id", "_normalized_item_id"], inplace=True)
 
         item_counts = ratings["item_id"].value_counts()
         user_counts = ratings["user_id"].value_counts()
@@ -448,6 +677,7 @@ class AmazonDataProcessor(DataProcessor):
             Path(self.user_lookup_csv()),
             normalized_col="normalized_user_id",
             original_col="original_user_id",
+            key_normalizer=str.casefold,
         )
         ratings["user_id"] = user_ids
 
@@ -456,6 +686,7 @@ class AmazonDataProcessor(DataProcessor):
             Path(self.item_lookup_csv()),
             normalized_col="normalized_item_id",
             original_col="original_item_id",
+            key_normalizer=str.casefold,
         )
         ratings["item_id"] = item_ids
 
@@ -470,6 +701,32 @@ class AmazonDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns=self._extra_sequence_columns,
         )
+        if self._apply_ser_loo and not seq_df.empty:
+            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
+                ratings,
+                seq_df,
+                min_length=self._min_sequence_length,
+            )
+            if ser_stats["dropped"]:
+                log.info(
+                    "%s Ser-LOO removed %s users without ser interactions",
+                    self._prefix,
+                    ser_stats["dropped"],
+                )
+            if ser_stats["truncated"]:
+                log.info(
+                    "%s Ser-LOO truncated post-ser interactions for %s users",
+                    self._prefix,
+                    ser_stats["truncated"],
+                )
+            length_filtered = ser_stats.get("length_filtered", 0)
+            if length_filtered:
+                log.info(
+                    "%s Ser-LOO dropped %s users below min_length=%s",
+                    self._prefix,
+                    length_filtered,
+                    self._min_sequence_length,
+                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",
@@ -517,6 +774,7 @@ class SerenLensDataProcessor(DataProcessor):
             output_root=output_root,
             lookup_root=lookup_root,
         )
+        self._apply_ser_loo = True
         self._ratings_path = Path(ratings_path)
         self._min_sequence_length = max(1, min_sequence_length)
 
@@ -527,15 +785,28 @@ class SerenLensDataProcessor(DataProcessor):
         ratings = pd.read_csv(
             self._ratings_path,
             usecols=["user_id", "item_id", "rating", "timestamp", "label"],
-            dtype={
-                "user_id": str,
-                "item_id": str,
-                "rating": float,
-                "timestamp": float,
-                "label": float,
-            },
             engine="python",
         )
+        ratings["user_id"] = ratings["user_id"].astype(str)
+        ratings["item_id"] = ratings["item_id"].astype(str)
+        ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
+        ratings["timestamp"] = pd.to_numeric(ratings["timestamp"], errors="coerce")
+        ratings["label"] = pd.to_numeric(ratings["label"], errors="coerce")
+
+        invalid_mask = ratings[["rating", "timestamp", "label"]].isnull().any(axis=1)
+        if invalid_mask.any():
+            dropped = int(invalid_mask.sum())
+            log.warning(
+                "%s dropping %s SerenLens rows with invalid numeric fields",
+                self._prefix,
+                dropped,
+            )
+            ratings = ratings.loc[~invalid_mask].reset_index(drop=True)
+            if ratings.empty:
+                raise ValueError(
+                    f"All rows removed from SerenLens ratings after filtering invalid numeric values for {self._prefix}"
+                )
+
         ratings["rating"] = ratings["rating"].astype(float)
         ratings["timestamp"] = ratings["timestamp"].astype("int64")
         ratings["label"] = ratings["label"].astype(int)
@@ -547,6 +818,7 @@ class SerenLensDataProcessor(DataProcessor):
             Path(self.user_lookup_csv()),
             normalized_col="normalized_user_id",
             original_col="original_user_id",
+            key_normalizer=str.casefold,
         )
         ratings["user_id"] = user_ids
 
@@ -555,6 +827,7 @@ class SerenLensDataProcessor(DataProcessor):
             Path(self.item_lookup_csv()),
             normalized_col="normalized_item_id",
             original_col="original_item_id",
+            key_normalizer=str.casefold,
         )
         ratings["item_id"] = item_ids
 
@@ -569,6 +842,32 @@ class SerenLensDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns={"label": "sequence_ser_label"},
         )
+        if self._apply_ser_loo and not seq_df.empty:
+            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
+                ratings,
+                seq_df,
+                min_length=self._min_sequence_length,
+            )
+            if ser_stats["dropped"]:
+                log.info(
+                    "%s Ser-LOO removed %s users without ser interactions",
+                    self._prefix,
+                    ser_stats["dropped"],
+                )
+            if ser_stats["truncated"]:
+                log.info(
+                    "%s Ser-LOO truncated post-ser interactions for %s users",
+                    self._prefix,
+                    ser_stats["truncated"],
+                )
+            length_filtered = ser_stats.get("length_filtered", 0)
+            if length_filtered:
+                log.info(
+                    "%s Ser-LOO dropped %s users below min_length=%s",
+                    self._prefix,
+                    length_filtered,
+                    self._min_sequence_length,
+                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",

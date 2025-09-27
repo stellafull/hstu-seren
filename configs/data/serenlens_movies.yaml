@@ -1,14 +1,12 @@
 # @package data
-# tuning dataset for serendipity-2018 answers
+# tuning dataset for serenlens movies
 
 _target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
-dataset_name: serendipity-2018-answers
+dataset_name: serenlens_movies
 data_preprocessor:
-  _target_: generative_recommenders_pl.data.preprocessor.SerendipityAnswersDataProcessor
-  ratings_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/answers.csv
-  movies_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/movies.csv
-  training_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/training.csv
-  prefix: serendipity-2018
+  _target_: generative_recommenders_pl.data.preprocessor.SerenLensDataProcessor
+  ratings_path: ${paths.root_dir}/tmp/amzn_mv_2015/SerenLens_Movies.csv
+  prefix: amazon_movies
   output_root: ${paths.root_dir}/tmp/tuning
   lookup_root: ${paths.root_dir}/tmp/pre_train
   min_sequence_length: 2
