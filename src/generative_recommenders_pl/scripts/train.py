@@ -4,7 +4,7 @@ import hydra
 import lightning as L
 import torch.multiprocessing
 from lightning.pytorch.loggers import Logger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from generative_recommenders_pl.utils.instantiators import (
     get_metric_value,
@@ -42,6 +42,11 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     datamodule: L.LightningDataModule = hydra.utils.instantiate(
         cfg.data, _recursive_=False
     )
+
+    max_item_id = getattr(datamodule, "max_item_id", None)
+    if max_item_id is not None and cfg.get("model") and cfg.model.get("embeddings"):
+        with open_dict(cfg.model.embeddings):
+            cfg.model.embeddings.num_items = int(max_item_id)
 
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: L.LightningModule = hydra.utils.instantiate(

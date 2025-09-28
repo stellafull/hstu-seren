@@ -74,6 +74,7 @@ def seq_features_from_row(
         "target_ids",
         "target_ratings",
         "target_timestamps",
+        "target_ser_label",
     }
     features = SequentialFeatures(
         past_lengths=historical_lengths,

@@ -154,12 +154,26 @@ class RecoDataset(torch.utils.data.Dataset):
             0,
             sampling_kept_mask=sampling_kept_mask,
         )
+        ser_sequence = None
+        if "sequence_ser_label" in data:
+            ser_sequence, ser_len = eval_int_list(
+                data.sequence_ser_label,
+                self._padding_length,
+                self._ignore_last_n,
+                0,
+                sampling_kept_mask=sampling_kept_mask,
+            )
+            ser_sequence = [int(x) for x in ser_sequence]
         assert (
             movie_history_len == timestamps_len
         ), f"history len {movie_history_len} differs from timestamp len {timestamps_len}."
         assert (
             movie_history_len == ratings_len
         ), f"history len {movie_history_len} differs from ratings len {ratings_len}."
+        if ser_sequence is not None:
+            assert (
+                movie_history_len == ser_len
+            ), f"history len {movie_history_len} differs from ser len {ser_len}."
 
         def _truncate_or_pad_seq(
             y: List[int], target_len: int, chronological: bool
@@ -203,6 +217,19 @@ class RecoDataset(torch.utils.data.Dataset):
             max_seq_len,
             self._chronological,
         )
+        if ser_sequence is not None:
+            historical_ser = ser_sequence[1:]
+            target_ser_label = ser_sequence[0] if ser_sequence else 0
+            if self._chronological:
+                historical_ser.reverse()
+            historical_ser = _truncate_or_pad_seq(
+                historical_ser,
+                max_seq_len,
+                self._chronological,
+            )
+        else:
+            historical_ser = None
+            target_ser_label = 0
         ret = {
             "user_id": user_id,
             "historical_ids": torch.tensor(historical_ids, dtype=torch.int64),
@@ -215,6 +242,11 @@ class RecoDataset(torch.utils.data.Dataset):
             "target_ratings": target_ratings,
             "target_timestamps": target_timestamps,
         }
+        if historical_ser is not None:
+            ret["historical_ser_labels"] = torch.tensor(
+                historical_ser, dtype=torch.int64
+            )
+        ret["target_ser_label"] = torch.tensor(target_ser_label, dtype=torch.int64)
 
         for column in self._additional_columns:
             # currently we do not consider the sequence columns in the additional columns
@@ -234,8 +266,9 @@ class RecoDataModule(L.LightningDataModule):
         chronological: bool,
         positional_sampling_ratio: float,
         batch_size: int = 32,
-        num_workers: int = os.cpu_count() // 4,
+        num_workers: Optional[int] = None,
         prefetch_factor: int = 4,
+        pin_memory: bool = False,
     ):
         super().__init__()
         self.__dict__.update(locals())
@@ -252,8 +285,12 @@ class RecoDataModule(L.LightningDataModule):
         self.chronological = chronological
         self.positional_sampling_ratio = positional_sampling_ratio
         self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.prefetch = prefetch_factor
+        if num_workers is None:
+            cpu_count = os.cpu_count() or 0
+            num_workers = 0 if cpu_count < 2 else max(cpu_count // 4, 1)
+        self.num_workers = int(num_workers)
+        self.prefetch = prefetch_factor if self.num_workers > 0 else None
+        self.pin_memory = bool(pin_memory)
         self.__init_item_ids()
 
     def __init_item_ids(self):
@@ -298,10 +335,15 @@ class RecoDataModule(L.LightningDataModule):
             self.all_item_ids = all_item_ids
             self.max_item_id = max_item_id
         else:
-            self.all_item_ids = [
-                x + 1 for x in range(self.data_preprocessor.expected_num_unique_items())
-            ]
-            self.max_item_id = self.data_preprocessor.expected_num_unique_items()
+            expected_items = self.data_preprocessor.expected_num_unique_items()
+            if expected_items is None:
+                raise ValueError(
+                    "Data preprocessor could not determine the number of unique items. "
+                    "Ensure the dataset is prepared (e.g., `make prepare_data data=%s`)."
+                    % self.dataset_name
+                )
+            self.all_item_ids = [x + 1 for x in range(expected_items)]
+            self.max_item_id = expected_items
 
     def instantiate_dataset(self, dataset: RecoDataset | DictConfig) -> RecoDataset:
         if isinstance(dataset, DictConfig):
@@ -332,37 +374,45 @@ class RecoDataModule(L.LightningDataModule):
             self.test_dataset = self.instantiate_dataset(self.test_dataset)
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            prefetch_factor=self.prefetch,
-        )
+        kwargs = {
+            "batch_size": self.batch_size,
+            "shuffle": True,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+        }
+        if self.prefetch is not None:
+            kwargs["prefetch_factor"] = self.prefetch
+        return torch.utils.data.DataLoader(self.train_dataset, **kwargs)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            prefetch_factor=self.prefetch,
-        )
+        kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+        }
+        if self.prefetch is not None:
+            kwargs["prefetch_factor"] = self.prefetch
+        return torch.utils.data.DataLoader(self.val_dataset, **kwargs)
 
     def test_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            prefetch_factor=self.prefetch,
-        )
+        kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+        }
+        if self.prefetch is not None:
+            kwargs["prefetch_factor"] = self.prefetch
+        return torch.utils.data.DataLoader(self.test_dataset, **kwargs)
 
     def predict_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            prefetch_factor=self.prefetch,
-        )
+        kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+        }
+        if self.prefetch is not None:
+            kwargs["prefetch_factor"] = self.prefetch
+        return torch.utils.data.DataLoader(self.test_dataset, **kwargs)
 
     def save_predictions(self, output_file: str, predictions: dict):
         """Save the predictions to a file.

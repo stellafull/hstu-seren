@@ -67,6 +67,23 @@ Train the Model with a Specific Experiment Configuration. Choose an experiment c
 make train experiment=ml-1m-hstu
 ```
 
+### Serendipity Two-Stage Pipeline
+
+We provide dedicated configs for the serendipity-focused HSTU multi-head model:
+
+1. **Stage A – relevance pre-training**
+   - Amazon Books (2015): `make train experiment=pretrain_amazon_books`
+   - Amazon Movies (2015): `make train experiment=pretrain_amazon_movies`
+   - Serendipity-2018 training split: `make train experiment=pretrain_ser2018`
+   - Checkpoints are written to `tmp/checkpoints/<experiment>/last.ckpt` for use in Stage B.
+2. **Stage B – serendipity fine-tuning**
+   - Serendipity-2018 answers: `make train experiment=finetune_ser2018`
+   - SerenLens Books: `make train experiment=finetune_serenlens_books`
+   - SerenLens Movies: `make train experiment=finetune_serenlens_movies`
+   - To fine-tune from a custom checkpoint, override `model.init_from_ckpt` on the command line.
+
+The fine-tuning stage logs HR@K / NDCG@K for relevance together with HR_ser@K / NDCG_ser@K computed on ser-positive targets.
+
 Evaluate the Model with a Given Checkpoint
 
 ```bash

@@ -318,10 +318,38 @@ class DataProcessor(abc.ABC):
         self.output_dir().mkdir(parents=True, exist_ok=True)
 
     def expected_num_unique_items(self) -> Optional[int]:
+        self._ensure_item_statistics()
         return self._expected_num_unique_items
 
     def expected_max_item_id(self) -> Optional[int]:
+        self._ensure_item_statistics()
         return self._expected_max_item_id
+
+    def _ensure_item_statistics(self) -> None:
+        if (
+            self._expected_num_unique_items is not None
+            and self._expected_max_item_id is not None
+        ):
+            return
+        lookup_path = Path(self.item_lookup_csv())
+        if not Path(lookup_path).exists():
+            return
+        try:
+            lookup = pd.read_csv(lookup_path)
+        except Exception as exc:  # pragma: no cover - informative fallback
+            log.warning(
+                "%s failed to load item lookup metadata: %s",
+                self._prefix,
+                exc,
+            )
+            return
+        if self._expected_num_unique_items is None:
+            self._expected_num_unique_items = int(lookup.shape[0])
+        if (
+            self._expected_max_item_id is None
+            and "normalized_item_id" in lookup.columns
+        ):
+            self._expected_max_item_id = int(lookup["normalized_item_id"].max())
 
     @abc.abstractmethod
     def preprocess_rating(self) -> int:
