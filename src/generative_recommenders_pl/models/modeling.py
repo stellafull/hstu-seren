@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections import defaultdict
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Tuple
 
 import torch
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -86,6 +86,15 @@ class HSTUSeren(GenerativeRecommenders):
         )
         self.ser_head = SerHead(item_embedding_dim)
 
+        if not isinstance(self.loss, AutoregressiveLoss):
+            raise ValueError(
+                "HSTUSeren requires an AutoregressiveLoss for the relevance head."
+            )
+        if self.negatives_sampler is None or self.similarity is None:
+            raise ValueError(
+                "HSTUSeren requires both a negatives sampler and a similarity module."
+            )
+
         weights = loss_weights or {"rel": 1.0, "ser": 1.0}
         if isinstance(weights, DictConfig):
             weights = dict(weights)
@@ -138,6 +147,7 @@ class HSTUSeren(GenerativeRecommenders):
         # Include the supervised target token in the valid sequence length so the
         # encoder actually processes the appended position instead of masking it out.
         seq_features = seq_features._replace(past_lengths=target_positions + 1)
+        prediction_positions = torch.clamp(target_positions - 1, min=0)
 
         input_embeddings = self.embeddings.get_item_embeddings(seq_features.past_ids)
         seq_features = seq_features._replace(past_embeddings=input_embeddings)
@@ -146,7 +156,7 @@ class HSTUSeren(GenerativeRecommenders):
         batch_indices = torch.arange(
             encoded_embeddings.size(0), device=encoded_embeddings.device
         )
-        hidden = encoded_embeddings[batch_indices, target_positions, :]
+        hidden = encoded_embeddings[batch_indices, prediction_positions, :]
 
         logits_next = self.rel_head(hidden)
         logits_ser = self.ser_head(hidden)
@@ -162,13 +172,6 @@ class HSTUSeren(GenerativeRecommenders):
             "hidden": hidden,
         }
         return outputs, target_ids, ser_labels
-
-    def _use_autoregressive_rel_loss(self) -> bool:
-        return (
-            isinstance(self.loss, AutoregressiveLoss)
-            and self.negatives_sampler is not None
-            and self.similarity is not None
-        )
 
     def _compute_rel_loss(
         self,
@@ -215,6 +218,25 @@ class HSTUSeren(GenerativeRecommenders):
                 "HSTUSeren relevance loss computation." % self.loss.__class__.__name__
             ) from exc
 
+    def _aggregate_losses(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        target_ids: torch.Tensor,
+        ser_labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Compute weighted relevance and ser losses for a batch."""
+
+        rel_loss_fn: Callable[[Dict[str, torch.Tensor], torch.Tensor], torch.Tensor] | None = self._compute_rel_loss
+        rel_loss, ser_loss = compute_losses(
+            outputs,
+            target_ids,
+            ser_labels,
+            pos_weight=self.pos_weight,
+            rel_loss_fn=rel_loss_fn,
+        )
+        total_loss = self.loss_weights["rel"] * rel_loss + self.loss_weights["ser"] * ser_loss
+        return total_loss, (rel_loss, ser_loss)
+
     def _compute_ranks(self, logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
         # break ties deterministically by adding tiny noise so uniform logits
         # don't give rank=1 for every item
@@ -233,8 +255,9 @@ class HSTUSeren(GenerativeRecommenders):
         ser_labels: torch.Tensor,
     ) -> None:
         self._metric_buffers[stage]["ranks"].append(ranks.detach().cpu())
+        ser_mask = ser_labels.eq(1)
         self._metric_buffers[stage]["ser_mask"].append(
-            ser_labels.to(dtype=torch.bool).detach().cpu()
+            ser_mask.detach().cpu()
         )
 
     def _finalize_metrics(self, stage: str) -> None:
@@ -302,94 +325,58 @@ class HSTUSeren(GenerativeRecommenders):
     # ------------------------------------------------------------------
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         outputs, target_ids, ser_labels = self._forward_batch(batch)
-        rel_loss_fn: Callable[[Dict[str, torch.Tensor], torch.Tensor], torch.Tensor] | None
-        if self._use_autoregressive_rel_loss():
-            rel_loss_fn = self._compute_rel_loss
-        else:
-            rel_loss_fn = None
-        losses = compute_losses(
-            outputs,
-            target_ids,
-            ser_labels,
-            pos_weight=self.pos_weight,
-            rel_loss_fn=rel_loss_fn,
+        loss, (rel_loss, ser_loss) = self._aggregate_losses(
+            outputs, target_ids, ser_labels
         )
-        loss = (
-            self.loss_weights["rel"] * losses[0]
-            + self.loss_weights["ser"] * losses[1]
+        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss_next", rel_loss, prog_bar=False)
+        self.log("train/loss_ser", ser_loss, prog_bar=False)
+        return loss
+
+    def evaluation_step(
+        self, batch: Dict[str, torch.Tensor], stage: str
+    ) -> torch.Tensor:
+        outputs, target_ids, ser_labels = self._forward_batch(batch)
+        loss, (rel_loss, ser_loss) = self._aggregate_losses(
+            outputs, target_ids, ser_labels
         )
 
-        self.log("train/loss", loss, prog_bar=True)
-        self.log("train/loss_next", losses[0], prog_bar=False)
-        self.log("train/loss_ser", losses[1], prog_bar=False)
+        self.log(
+            f"{stage}/loss",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
+        self.log(
+            f"{stage}/loss_next",
+            rel_loss,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+        )
+        self.log(
+            f"{stage}/loss_ser",
+            ser_loss,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+        )
+
+        ranks = self._compute_ranks(outputs["logits_next"], target_ids)
+        self._update_buffers(stage, ranks, ser_labels)
         return loss
 
     def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        outputs, target_ids, ser_labels = self._forward_batch(batch)
-        rel_loss_fn: Callable[[Dict[str, torch.Tensor], torch.Tensor], torch.Tensor] | None
-        if self._use_autoregressive_rel_loss():
-            rel_loss_fn = self._compute_rel_loss
-        else:
-            rel_loss_fn = None
-        losses = compute_losses(
-            outputs,
-            target_ids,
-            ser_labels,
-            pos_weight=self.pos_weight,
-            rel_loss_fn=rel_loss_fn,
-        )
-        loss = (
-            self.loss_weights["rel"] * losses[0]
-            + self.loss_weights["ser"] * losses[1]
-        )
-
-        self.log("val/loss", loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log(
-            "val/loss_next", losses[0], prog_bar=False, on_step=False, on_epoch=True
-        )
-        self.log(
-            "val/loss_ser", losses[1], prog_bar=False, on_step=False, on_epoch=True
-        )
-
-        ranks = self._compute_ranks(outputs["logits_next"], target_ids)
-        self._update_buffers("val", ranks, ser_labels)
-        return loss
+        return self.evaluation_step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
         self._finalize_metrics("val")
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        outputs, target_ids, ser_labels = self._forward_batch(batch)
-        rel_loss_fn: Callable[[Dict[str, torch.Tensor], torch.Tensor], torch.Tensor] | None
-        if self._use_autoregressive_rel_loss():
-            rel_loss_fn = self._compute_rel_loss
-        else:
-            rel_loss_fn = None
-        losses = compute_losses(
-            outputs,
-            target_ids,
-            ser_labels,
-            pos_weight=self.pos_weight,
-            rel_loss_fn=rel_loss_fn,
-        )
-        loss = (
-            self.loss_weights["rel"] * losses[0]
-            + self.loss_weights["ser"] * losses[1]
-        )
-
-        self.log("test/loss", loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log(
-            "test/loss_next", losses[0], prog_bar=False, on_step=False, on_epoch=True
-        )
-        self.log(
-            "test/loss_ser", losses[1], prog_bar=False, on_step=False, on_epoch=True
-        )
-
-        ranks = self._compute_ranks(outputs["logits_next"], target_ids)
-        self._update_buffers("test", ranks, ser_labels)
-        return loss
+        return self.evaluation_step(batch, "test")
 
     def on_test_epoch_end(self) -> None:
         self._finalize_metrics("test")

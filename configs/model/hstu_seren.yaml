@@ -23,7 +23,7 @@ compile_model: false
 
 embeddings:
   _target_: generative_recommenders_pl.models.embeddings.embeddings.LocalEmbeddingModule
-  num_items: ${data.data_preprocessor.expected_max_item_id}
+  num_items: ${data.data_preprocessor.expected_num_unique_items}
   item_embedding_dim: ${model.item_embedding_dim}
 
 preprocessor:
@@ -38,8 +38,8 @@ sequence_encoder:
   max_output_len: ${eval:${model.gr_output_length} + 1}
   embedding_dim: ${model.item_embedding_dim}
   item_embedding_dim: ${model.item_embedding_dim}
-  num_blocks: 2
-  num_heads: 1
+  num_blocks: 4
+  num_heads: 2
   attention_dim: ${model.item_embedding_dim}
   linear_dim: ${model.item_embedding_dim}
   linear_dropout_rate: 0.1
@@ -55,8 +55,12 @@ postprocessor:
   embedding_dim: ${model.item_embedding_dim}
   eps: 1e-6
 
-similarity: null
-negatives_sampler: null
+similarity:
+  _target_: generative_recommenders_pl.models.similarity.dot_product.DotProductSimilarity
+negatives_sampler:
+  _target_: generative_recommenders_pl.models.negatives_samples.negative_sampler.LocalNegativesSampler
+  l2_norm: true
+  l2_norm_eps: 1e-6
 candidate_index: null
 
 tie_weights: true
@@ -67,3 +71,8 @@ metrics:
     ks: [5, 10]
   serendipity:
     ks: [5, 10]
+
+loss:
+  _target_: generative_recommenders_pl.models.losses.autoregressive_losses.SampledSoftmaxLoss
+  num_to_sample: 128
+  softmax_temperature: 0.05

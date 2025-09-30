@@ -9,7 +9,7 @@ seed: 42
 tags: ["finetune", "serendipity"]
 
 trainer:
-  max_epochs: 10
+  max_epochs: 100
   log_every_n_steps: 25
   enable_checkpointing: true
 

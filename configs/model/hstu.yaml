@@ -18,7 +18,7 @@ item_embedding_dim: 50
 
 embeddings:
   _target_: generative_recommenders_pl.models.embeddings.embeddings.LocalEmbeddingModule
-  num_items: ${data.data_preprocessor.expected_max_item_id}
+  num_items: ${data.data_preprocessor.expected_num_unique_items}
   item_embedding_dim: ${model.item_embedding_dim}
 
 preprocessor:

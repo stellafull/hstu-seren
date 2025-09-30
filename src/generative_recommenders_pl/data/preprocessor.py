@@ -183,6 +183,7 @@ def _apply_ser_loo(
     ser_lengths: list[int] = []
     dropped_users = 0
     truncated_users = 0
+    kept_without_positive = 0
 
     def _split_sequence(raw: str) -> list[str]:
         if pd.isna(raw) or raw == "":
@@ -202,17 +203,23 @@ def _apply_ser_loo(
 
     for _, row in sequences.iterrows():
         ser_labels = _split_sequence(row["sequence_ser_label"])
+        if not ser_labels:
+            dropped_users += 1
+            continue
+
         ser_index = None
         for idx in range(len(ser_labels) - 1, -1, -1):
             if _is_ser_positive(ser_labels[idx]):
                 ser_index = idx
                 break
-        if ser_index is None:
-            dropped_users += 1
-            continue
 
-        trim_length = ser_index + 1
-        truncated = len(ser_labels) > trim_length
+        if ser_index is None:
+            trim_length = len(ser_labels)
+            truncated = False
+            kept_without_positive += 1
+        else:
+            trim_length = ser_index + 1
+            truncated = len(ser_labels) > trim_length
 
         new_row = row.copy()
         for column in sequence_columns:
@@ -235,7 +242,11 @@ def _apply_ser_loo(
     else:
         trimmed_sequences = pd.DataFrame(columns=sequences.columns)
         lengths = pd.Series(dtype="int64")
-    stats = {"dropped": dropped_users, "truncated": truncated_users}
+    stats = {
+        "dropped": dropped_users,
+        "truncated": truncated_users,
+        "kept_without_ser_positive": kept_without_positive,
+    }
     return trimmed_sequences, lengths, stats
 
 
@@ -475,6 +486,12 @@ class MovielensDataProcessor(DataProcessor):
                     "%s Ser-LOO truncated post-ser interactions for %s users",
                     self._prefix,
                     ser_stats["truncated"],
+                )
+            if ser_stats["kept_without_ser_positive"]:
+                log.info(
+                    "%s Ser-LOO kept %s users without ser-positive targets",
+                    self._prefix,
+                    ser_stats["kept_without_ser_positive"],
                 )
             length_filtered = ser_stats.get("length_filtered", 0)
             if length_filtered:
