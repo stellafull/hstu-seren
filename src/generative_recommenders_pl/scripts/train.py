@@ -2,7 +2,11 @@ from typing import Any, Optional
 
 import hydra
 import lightning as L
+import torch
 import torch.multiprocessing
+
+torch.backends.cuda.matmul.allow_tf32 = True if torch.cuda.is_available() else False
+torch.backends.cudnn.allow_tf32 = True
 from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig, OmegaConf, open_dict
 

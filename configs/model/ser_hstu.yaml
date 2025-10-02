@@ -1,15 +1,22 @@
-_target_: generative_recommenders_pl.models.retrieval.Retrieval
+_target_: generative_recommenders_pl.models.ser_retrieval.SerRetrieval
 
 optimizer:
-  _target_: torch.optim.SGD
+  _target_: torch.optim.AdamW
   _partial_: true
+  lr: 3e-4
+  betas: [0.9, 0.98]
+  weight_decay: 0.01
 
 scheduler:
-  _target_: torch.optim.lr_scheduler.ConstantLR
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
   _partial_: true
+  mode: max
+  factor: 0.5
+  patience: 8
+  threshold: 1e-4
 
 configure_optimizer_params:
-  monitor: val/hr@100
+  monitor: val/ndcg@100
   interval: epoch
   frequency: 1
 
@@ -64,15 +71,44 @@ candidate_index:
   top_k_module:
     _target_: generative_recommenders_pl.models.indexing.top_k.MIPSBruteForceTopK
 
+candidate_builder:
+  _target_: generative_recommenders_pl.models.postprocessors.ser_postprocessors.CandidateSetBuilder
+  candidate_size: 200
+  ensure_target: true
+  pad_id: 0
+
 loss:
-  _target_: generative_recommenders_pl.models.losses.autoregressive_losses.SampledSoftmaxLoss
-  num_to_sample: 128
-  softmax_temperature: 0.05
+  _target_: generative_recommenders_pl.models.losses.soft_ndcg_ser.SoftNDCGSerLoss
+  k: 10
+  beta: 0.05
+  soft_rank_strength: 0.5
+  cutoff_temperature: 1.0
+
+ser_metrics:
+  _target_: generative_recommenders_pl.models.metrics.ser_metrics.SerMetrics
+  at_k_list: [5, 10, 20]
+  condition_on_positive: false
 
 metrics:
   _target_: generative_recommenders_pl.models.metrics.retrieval.RetrievalMetrics
   k: ${model.candidate_index.k}
   at_k_list: [10, 50, 100, 200]
+
+ser_energy:
+  _target_: generative_recommenders_pl.models.ser_energy.SerEnergy
+  d_in: ${eval:${model.item_embedding_dim} + 4}
+  d_hidden: 256
+  num_layers: 2
+  dropout: 0.1
+  activation: gelu
+
+use_ser_energy: true
+lambda_ser: 0.4
+detach_base_steps: 10000
+ser_label_source: hybrid
+eval_ser_label_source: null
+unexpectedness_quantile: 0.65
+relevance_gate_quantile: null
 
 # compile model for faster training with pytorch 2.0
 compile_model: false

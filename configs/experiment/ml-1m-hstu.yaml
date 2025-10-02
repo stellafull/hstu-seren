@@ -43,7 +43,3 @@ callbacks:
   model_checkpoint:
     monitor: val/ndcg@100
     mode: max
-  early_stopping:
-    monitor: val/ndcg@100
-    patience: 20
-    mode: max

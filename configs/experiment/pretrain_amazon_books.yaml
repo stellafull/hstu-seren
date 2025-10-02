@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - override /data: amazon_books
+  - override /model: ser_hstu
+
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 100
+
+data:
+  batch_size: 128
+
+model:
+  item_embedding_dim: 512
+  optimizer:
+    lr: 5e-4
+  configure_optimizer_params:
+    monitor: val/ndcg@100
+  ser_label_source: online
+  sequence_encoder:
+    num_heads: 8
+    num_blocks: 4
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_amazon_books
+    save_last: true
+    save_top_k: 0

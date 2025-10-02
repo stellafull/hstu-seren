@@ -1,0 +1,36 @@
+# @package _global_
+
+defaults:
+  - override /data: serendipity_2018_answers
+  - override /model: ser_hstu
+
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 100
+
+data:
+  batch_size: 256
+
+model:
+  item_embedding_dim: 256
+  configure_optimizer_params:
+    monitor: val/ndcg_ser@10
+  lambda_ser: 2
+  ser_label_source: hybrid
+  eval_ser_label_source: human
+  relevance_gate_quantile: null
+  init_from_ckpt: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018/last.ckpt
+  loss:
+    k: 10
+    beta: 0.05
+    soft_rank_strength: 0.5
+  ser_metrics:
+    condition_on_positive: true
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_ser2018
+    save_last: true
+    save_top_k: 0

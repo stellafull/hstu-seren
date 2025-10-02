@@ -65,7 +65,3 @@ callbacks:
   model_checkpoint:
     monitor: val/ap
     mode: max
-  early_stopping:
-    monitor: val/ap
-    patience: 20
-    mode: max

@@ -59,7 +59,7 @@ class Retrieval(GenerativeRecommenders):
             torch.Tensor: The loss tensor.
         """
         # convert the batch to the sequence features (TODO: move to datamodule)
-        seq_features, target_ids, target_ratings = seq_features_from_row(
+        seq_features, target_ids, target_ratings, _ = seq_features_from_row(
             batch,
             device=self.device,
             max_output_length=self.gr_output_length + 1,
@@ -139,7 +139,7 @@ class Retrieval(GenerativeRecommenders):
             torch.Tensor: The loss tensor.
         """
         # convert the batch to the sequence features (TODO: move to datamodule)
-        seq_features, target_ids, target_ratings = seq_features_from_row(
+        seq_features, target_ids, target_ratings, _ = seq_features_from_row(
             batch,
             device=self.device,
             max_output_length=self.gr_output_length + 1,
@@ -211,7 +211,7 @@ class Retrieval(GenerativeRecommenders):
         self, batch: tuple[torch.Tensor], batch_idx: int
     ) -> dict[str, list]:
         """Lightning calls this inside the predict loop."""
-        seq_features, _, _ = seq_features_from_row(
+        seq_features, _, _, _ = seq_features_from_row(
             batch,
             device=self.device,
             max_output_length=self.gr_output_length + 1,

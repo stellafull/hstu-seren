@@ -58,7 +58,7 @@ class Ranking(GenerativeRecommenders):
             torch.Tensor: The loss tensor.
         """
         # convert the batch to the sequence features (TODO: move to datamodule)
-        seq_features, target_ids, target_ratings = seq_features_from_row(
+        seq_features, target_ids, target_ratings, _ = seq_features_from_row(
             batch,
             device=self.device,
             max_output_length=self.gr_output_length + 1,
@@ -126,7 +126,7 @@ class Ranking(GenerativeRecommenders):
             torch.Tensor: The loss tensor.
         """
         # convert the batch to the sequence features (TODO: move to datamodule)
-        seq_features, target_ids, target_ratings = seq_features_from_row(
+        seq_features, target_ids, target_ratings, _ = seq_features_from_row(
             batch,
             device=self.device,
             max_output_length=self.gr_output_length + 1,

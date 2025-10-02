@@ -103,29 +103,43 @@ class RelativeBucketedTimeAndPositionBasedBias(RelativeAttentionBiasModule):
         Returns:
             (B, N, N).
         """
-        B = all_timestamps.size(0)
-        N = self._max_seq_len
-        t = F.pad(self._pos_w[: 2 * N - 1], [0, N]).repeat(N)
-        t = t[..., :-N].reshape(1, N, 3 * N - 2)
-        r = (2 * N - 1) // 2
+        B, actual_seq_len = all_timestamps.size()
+        seq_len = min(actual_seq_len, self._max_seq_len)
 
-        # [B, N + 1] to simplify tensor manipulations.
-        ext_timestamps = torch.cat(
-            [all_timestamps, all_timestamps[:, N - 1 : N]], dim=1
+        position_ids = torch.arange(
+            self._max_seq_len, device=self._pos_w.device
         )
-        # causal masking. Otherwise [:, :-1] - [:, 1:] works
+        rel_pos_indices = position_ids.unsqueeze(0) - position_ids.unsqueeze(1)
+        rel_pos_indices = rel_pos_indices + self._max_seq_len - 1
+        rel_pos_bias = self._pos_w[rel_pos_indices].unsqueeze(0)
+
+        if seq_len == 0:
+            # No valid timestamps; return position bias only.
+            return rel_pos_bias
+
+        timestamps = all_timestamps[:, :seq_len]
+        ext_timestamps = torch.cat(
+            [timestamps, timestamps[:, seq_len - 1 : seq_len]], dim=1
+        )
+        timestamp_deltas = (
+            ext_timestamps[:, 1:].unsqueeze(2) - ext_timestamps[:, :-1].unsqueeze(1)
+        )
         bucketed_timestamps = torch.clamp(
-            self._bucketization_fn(
-                ext_timestamps[:, 1:].unsqueeze(2) - ext_timestamps[:, :-1].unsqueeze(1)
-            ),
+            self._bucketization_fn(timestamp_deltas),
             min=0,
             max=self._num_buckets,
         ).detach()
-        rel_pos_bias = t[:, :, r:-r]
+
         rel_ts_bias = torch.index_select(
             self._ts_w, dim=0, index=bucketed_timestamps.view(-1)
-        ).view(B, N, N)
-        return rel_pos_bias + rel_ts_bias
+        ).view(B, seq_len, seq_len)
+
+        padded_rel_ts_bias = rel_pos_bias.new_zeros(
+            B, self._max_seq_len, self._max_seq_len
+        )
+        padded_rel_ts_bias[:, :seq_len, :seq_len] = rel_ts_bias
+
+        return rel_pos_bias + padded_rel_ts_bias
 
 
 HSTUCacheState = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]

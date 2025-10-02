@@ -48,6 +48,8 @@ class CandidateIndex(torch.nn.Module):
         Returns:
             (1, X, D) or (B, X, D) with the same shape as `ids'.
         """
+        if self._embeddings_t is None:
+            return None
         return self._embeddings_t.unsqueeze(2).permute(2, 1, 0).squeeze(2)
 
     def filter_invalid_ids(

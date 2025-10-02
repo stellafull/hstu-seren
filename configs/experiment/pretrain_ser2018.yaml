@@ -1,0 +1,28 @@
+# @package _global_
+
+defaults:
+  - override /data: serendipity_2018_training
+  - override /model: ser_hstu
+
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 100
+
+data:
+  batch_size: 256
+
+model:
+  item_embedding_dim: 256
+  optimizer:
+    lr: 5e-4
+  configure_optimizer_params:
+    monitor: val/ndcg@100
+  ser_label_source: online
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018
+    save_last: true
+    save_top_k: 0
