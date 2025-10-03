@@ -2,7 +2,7 @@
 
 defaults:
   - override /data: amazon_books
-  - override /model: ser_hstu
+  - override /model: hstu
 
 seed: 42
 
@@ -19,7 +19,6 @@ model:
     lr: 5e-4
   configure_optimizer_params:
     monitor: val/ndcg@100
-  ser_label_source: online
   sequence_encoder:
     num_heads: 8
     num_blocks: 4

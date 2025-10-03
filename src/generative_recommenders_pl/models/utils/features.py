@@ -19,7 +19,7 @@ def seq_features_from_row(
     row,
     device: torch.device,
     max_output_length: int,
-) -> Tuple[SequentialFeatures, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[SequentialFeatures, torch.Tensor, torch.Tensor]:
     historical_lengths = row["history_lengths"].to(device)  # [B]
     historical_ids = row["historical_ids"].to(device)  # [B, N]
     historical_ratings = row["historical_ratings"].to(device)
@@ -27,11 +27,6 @@ def seq_features_from_row(
     target_ids = row["target_ids"].to(device).unsqueeze(1)  # [B, 1]
     target_ratings = row["target_ratings"].to(device).unsqueeze(1)
     target_timestamps = row["target_timestamps"].to(device).unsqueeze(1)
-    target_ser = row.get("target_ser_label")
-    if target_ser is None:
-        target_ser_label = torch.zeros_like(target_ids)
-    else:
-        target_ser_label = target_ser.to(device).unsqueeze(1)
     if max_output_length > 0:
         B = historical_lengths.size(0)
         historical_ids = torch.cat(
@@ -79,7 +74,6 @@ def seq_features_from_row(
         "target_ids",
         "target_ratings",
         "target_timestamps",
-        "target_ser_label",
     }
     features = SequentialFeatures(
         past_lengths=historical_lengths,
@@ -95,4 +89,4 @@ def seq_features_from_row(
             },
         },
     )
-    return features, target_ids, target_ratings, target_ser_label
+    return features, target_ids, target_ratings

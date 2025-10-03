@@ -1,6 +1,6 @@
 import torch
 import torchmetrics
-from torchmetrics.utilities.data import dim_zero_cat
+import torchmetrics.utilities.data
 
 
 class MultiClsMetrics(torchmetrics.Metric):
@@ -44,8 +44,8 @@ class MultiClsMetrics(torchmetrics.Metric):
 
     def compute(self):
         # Concatenate the lists of tensors
-        preds = dim_zero_cat(self.preds)
-        target = dim_zero_cat(self.target)
+        preds = torchmetrics.utilities.data.dim_zero_cat(self.preds)
+        target = torchmetrics.utilities.data.dim_zero_cat(self.target)
 
         output = {}
         output["auroc"] = self.auroc(preds, target)

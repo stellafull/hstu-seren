@@ -1,28 +1,51 @@
 # @package _global_
 
+# to execute this experiment run:
+# python train.py experiment=ml-1m-hstu
+
 defaults:
   - override /data: serendipity_2018_training
-  - override /model: ser_hstu
+  - override /model: hstu
 
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
 seed: 42
 
 trainer:
-  min_epochs: 10
+  min_epochs: 20
   max_epochs: 100
 
 data:
-  batch_size: 256
-
+  batch_size: 1024
 model:
-  item_embedding_dim: 256
   optimizer:
-    lr: 5e-4
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 0.001
+    betas: [0.9, 0.98]
+    weight_decay: 0.001
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    _partial_: true
+    mode: max
+    factor: 0.1
+    patience: 10
+    threshold: 1e-4
+
   configure_optimizer_params:
     monitor: val/ndcg@100
-  ser_label_source: online
-
+    interval: epoch
+    frequency: 1
+  sequence_encoder:
+    item_embedding_dim: 256
+    num_blocks: 8
+    num_heads: 4
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018
-    save_last: true
-    save_top_k: 0
+    monitor: val/ndcg@100
+    mode: max
+  early_stopping:
+    monitor: val/ndcg@100
+    patience: 20
+    mode: max
