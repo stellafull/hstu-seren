@@ -179,20 +179,24 @@ class DataProcessor(abc.ABC):
         *,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
     ) -> None:
         self._prefix = prefix
         self._expected_num_unique_items = expected_num_unique_items
         self._expected_max_item_id = expected_max_item_id
         self._output_root = Path(output_root) if output_root is not None else DEFAULT_PRETRAIN_ROOT
         self._lookup_root = Path(lookup_root) if lookup_root is not None else self._output_root
+        self._output_dirname = str(output_dirname) if output_dirname is not None else prefix
+        self._lookup_dirname = str(lookup_dirname) if lookup_dirname is not None else prefix
         self._output_root.mkdir(parents=True, exist_ok=True)
         self._lookup_root.mkdir(parents=True, exist_ok=True)
 
     def output_dir(self) -> Path:
-        return self._output_root / self._prefix
+        return self._output_root / self._output_dirname
 
     def lookup_dir(self) -> Path:
-        return self._lookup_root / self._prefix
+        return self._lookup_root / self._lookup_dirname
 
     def output_format_csv(self) -> str:
         return str(self.output_dir() / "sasrec_format.csv")
@@ -260,6 +264,8 @@ class MovielensDataProcessor(DataProcessor):
         expected_max_item_id: Optional[int] = None,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
         extra_sequence_columns: Optional[dict[str, str]] = None,
     ) -> None:
         super().__init__(
@@ -268,6 +274,8 @@ class MovielensDataProcessor(DataProcessor):
             expected_max_item_id=expected_max_item_id,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
         self._ratings_path = Path(ratings_path)
         self._movies_path = Path(movies_path) if movies_path else None
@@ -388,6 +396,10 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         min_sequence_length: int = 1,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
+        use_training_initial_entries: bool = True,
+        use_movies_initial_entries: bool = True,
         serendipity_columns: Optional[list[str]] = None,
     ) -> None:
         self._ser_columns = serendipity_columns or [
@@ -404,6 +416,8 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             )
         self._training_path = Path(training_path)
         self._cached_training_user_ids: list[str] | None = None
+        self._use_training_initial_entries = bool(use_training_initial_entries)
+        self._use_movies_initial_entries = bool(use_movies_initial_entries)
         super().__init__(
             ratings_path,
             prefix,
@@ -411,10 +425,14 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             min_sequence_length=min_sequence_length,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
             extra_sequence_columns={"ser_label": "sequence_ser_label"},
         )
 
     def _user_lookup_initial_entries(self) -> Iterable[str] | None:
+        if not self._use_training_initial_entries:
+            return None
         if self._cached_training_user_ids is not None:
             return self._cached_training_user_ids
         if not self._training_path.exists():
@@ -452,6 +470,11 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         )
         return self._cached_training_user_ids
 
+    def _item_lookup_initial_entries(self) -> Iterable[str] | None:
+        if not self._use_movies_initial_entries:
+            return None
+        return super()._item_lookup_initial_entries()
+
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         missing = [col for col in self._ser_columns if col not in ratings.columns]
         if missing:
@@ -479,6 +502,8 @@ class AmazonDataProcessor(DataProcessor):
         expected_num_unique_items: Optional[int] = None,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
         extra_sequence_columns: Optional[dict[str, str]] = None,
     ) -> None:
         super().__init__(
@@ -487,6 +512,8 @@ class AmazonDataProcessor(DataProcessor):
             expected_max_item_id=None,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
         self._ratings_path = Path(ratings_path)
         self._serenlens_path = Path(serenlens_path)
@@ -631,6 +658,8 @@ class SerenLensDataProcessor(DataProcessor):
         min_sequence_length: int = 1,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
     ) -> None:
         super().__init__(
             prefix,
@@ -638,6 +667,8 @@ class SerenLensDataProcessor(DataProcessor):
             expected_max_item_id=None,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
         self._ratings_path = Path(ratings_path)
         self._min_sequence_length = max(1, min_sequence_length)

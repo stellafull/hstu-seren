@@ -1,23 +1,44 @@
 # @package _global_
 
-# to execute this experiment run:
-# python train.py experiment=ml-1m-hstu
+# Run pre-training on Serendipity 2018 using only the relevance objective.
 
 defaults:
   - override /data: serendipity_2018_training
-  - override /model: hstu
+  - override /model: hstu_seren
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
 
-# all parameters below will be merged with parameters from default configurations set above
-# this allows you to overwrite only specified parameters
 seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 8
+
+tags: ["ser2018", "pretrain"]
 
 trainer:
   min_epochs: 20
   max_epochs: 100
+  
 
-data:
-  batch_size: 1024
 model:
+  ser_metrics: null
+  seren_loss_weight: 0.0
+  seren_score_alpha: 0.0
+
+  transfer_learning:
+    enabled: false
+
+  pretrained_checkpoint_path: null
+  load_strict: false
+  item_embedding_dim: 256
+
+  sequence_encoder:
+    num_blocks: 8
+    num_heads: 4
+
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
@@ -37,15 +58,18 @@ model:
     monitor: val/ndcg@100
     interval: epoch
     frequency: 1
-  sequence_encoder:
-    item_embedding_dim: 256
-    num_blocks: 8
-    num_heads: 4
+
 callbacks:
   model_checkpoint:
-    monitor: val/ndcg@100
-    mode: max
-  early_stopping:
-    monitor: val/ndcg@100
-    patience: 20
-    mode: max
+    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018
+    filename: "epoch_{epoch:03d}"
+    save_last: true
+    save_top_k: 0
+
+logger:
+  tensorboard:
+    name: ser2018_pretrain
+    version: null
+  csv:
+    name: ser2018_pretrain
+

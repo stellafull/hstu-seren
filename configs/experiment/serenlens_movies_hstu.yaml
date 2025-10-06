@@ -3,7 +3,7 @@
 # Fine-tune on SerenLens books with serendipity supervision.
 
 defaults:
-  - override /data: serenlens_books
+  - override /data: serenlens_movies_experiment
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -13,31 +13,31 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 512
+  batch_size: 128
   num_workers: 48
-  max_sequence_length: 50
+  max_sequence_length: 200
 
 
-tags: ["serenlens_books", "finetune"]
+tags: ["serenlens_movies", "experiment"]
 
 trainer:
   min_epochs: 99
   max_epochs: 100
 
 model:
-  seren_loss_weight: 0.2
-  seren_score_alpha: 2
+  seren_loss_weight: 0
+  seren_score_alpha: 0
   seren_loss:
     pos_weight: 20
   transfer_learning:
-    enabled: true
-    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/amazon_books/last.ckpt
+    enabled: false
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/serenlens_movies/last.ckpt
     strict: false
     freeze_backbone: false
     freeze_modules: []
     unfreeze_modules: []
   load_strict: false
-  item_embedding_dim: 64
+  item_embedding_dim: 128
 
   sequence_encoder:
     num_blocks: 16
@@ -46,16 +46,16 @@ model:
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 0.0001
+    lr: 0.001
     betas: [0.9, 0.98]
-    weight_decay: 0.00001
+    weight_decay: 0.001
 
   scheduler:
     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
     _partial_: true
     mode: max
     factor: 0.1
-    patience: 5
+    patience: 10
     threshold: 1e-4
 
   configure_optimizer_params:
@@ -67,15 +67,15 @@ model:
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_serenlens_books
+    dirpath: ${paths.root_dir}/tmp/checkpoints/serenlens_movies
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: serenlens_books_finetune
+    name: serenlens_movies_experiment
     version: null
   csv:
-    name: serenlens_books_finetune
+    name: serenlens_movies_experiment
 
