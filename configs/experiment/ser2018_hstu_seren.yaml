@@ -24,6 +24,7 @@ trainer:
   max_epochs: 100
 
 model:
+  embedding_type: local  # set to "semantic_id" for SID ablations
   seren_loss_weight: 2
   seren_score_alpha: 10
   seren_loss:
@@ -77,4 +78,3 @@ logger:
     version: null
   csv:
     name: ser2018_hstu_seren_experiment
-

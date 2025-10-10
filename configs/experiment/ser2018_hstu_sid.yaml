@@ -1,9 +1,9 @@
 # @package _global_
 
-# Run pre-training on Serendipity 2018 using only the relevance objective.
+# Fine-tune on Serendipity 2018 answers with serendipity supervision.
 
 defaults:
-  - override /data: amazon_movies
+  - override /data: serendipity_2018_answers_experiment
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -13,26 +13,29 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 512
+  batch_size: 256
   num_workers: 8
+  max_sequence_length: 10
 
-tags: ["ama_mv", "pretrain"]
+tags: ["ser2018", "experiment", "sid"]
 
 trainer:
-  min_epochs: 20
+  min_epochs: 99
   max_epochs: 100
-  
 
 model:
-  embedding_type: local  # set to "semantic_id" for SID ablations
-  ser_metrics: null
-  seren_loss_weight: 0.0
-  seren_score_alpha: 0.0
-
+  embedding_type: semantic_id  # semantic ID embedding variant
+  seren_loss_weight: 0
+  seren_score_alpha: 0
+  seren_loss:
+    pos_weight: 10.0
   transfer_learning:
     enabled: false
-
-  pretrained_checkpoint_path: null
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/ser2018/last.ckpt
+    strict: false
+    freeze_backbone: false
+    freeze_modules: []
+    unfreeze_modules: []
   load_strict: false
   item_embedding_dim: 256
 
@@ -56,20 +59,22 @@ model:
     threshold: 1e-4
 
   configure_optimizer_params:
-    monitor: val/ndcg@100
+    monitor: val/ndcg@10
     interval: epoch
     frequency: 1
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies
+    dirpath: ${paths.root_dir}/tmp/checkpoints/ser2018
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
+compile_model: true
+
 logger:
   tensorboard:
-    name: ama_mv_pretrain
+    name: ser2018_experiment
     version: null
   csv:
-    name: ama_mv_pretrain
+    name: ser2018_experiment

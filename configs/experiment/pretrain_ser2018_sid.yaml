@@ -3,7 +3,7 @@
 # Run pre-training on Serendipity 2018 using only the relevance objective.
 
 defaults:
-  - override /data: amazon_movies
+  - override /data: serendipity_2018_training
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -13,10 +13,10 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 512
+  batch_size: 128
   num_workers: 8
 
-tags: ["ama_mv", "pretrain"]
+tags: ["ser2018", "pretrain", "sid"]
 
 trainer:
   min_epochs: 20
@@ -24,7 +24,10 @@ trainer:
   
 
 model:
-  embedding_type: local  # set to "semantic_id" for SID ablations
+  embedding_type: semantic_id
+  embedding_configs:
+    semantic_id:
+      emb_comb_method: projgate
   ser_metrics: null
   seren_loss_weight: 0.0
   seren_score_alpha: 0.0
@@ -62,14 +65,14 @@ model:
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies
+    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018_sid
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: ama_mv_pretrain
+    name: ser2018_pretrain_sid
     version: null
   csv:
-    name: ama_mv_pretrain
+    name: ser2018_pretrain_sid

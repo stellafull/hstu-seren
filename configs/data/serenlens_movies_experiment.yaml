@@ -3,6 +3,7 @@
 
 _target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
 dataset_name: serenlens_movies
+semantic_id_prefix: amazon_movies
 data_preprocessor:
   _target_: generative_recommenders_pl.data.preprocessor.SerenLensDataProcessor
   ratings_path: ${paths.root_dir}/tmp/amzn_mv_2015/SerenLens_Movies.csv

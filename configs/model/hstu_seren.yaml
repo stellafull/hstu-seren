@@ -15,11 +15,27 @@ configure_optimizer_params:
 
 gr_output_length: 10
 item_embedding_dim: 50
+embedding_type: local
+semantic_id_prefix: ${oc.select:data.semantic_id_prefix,${data.data_preprocessor.prefix}}
 
-embeddings:
-  _target_: generative_recommenders_pl.models.embeddings.embeddings.LocalEmbeddingModule
-  num_items: ${data.data_preprocessor.expected_max_item_id}
-  item_embedding_dim: ${model.item_embedding_dim}
+embedding_configs:
+  local:
+    _target_: generative_recommenders_pl.models.embeddings.embeddings.LocalEmbeddingModule
+    item_embedding_dim: ${model.item_embedding_dim}
+  semantic_id:
+    _target_: generative_recommenders_pl.models.embeddings.embeddings_sid.LocalSIDEmbeddingModule
+    item_embedding_dim: ${model.item_embedding_dim}
+    semantic_id_path: ${paths.root_dir}/tmp/semantic_id/${model.semantic_id_prefix}/semantic_ids.pt
+    quantizer_path: ${paths.root_dir}/tmp/semantic_id/${model.semantic_id_prefix}/quantizer.pt
+    emb_method: RQsum-indEmb
+    emb_comb_method: sum
+    scale_sid_emb: true
+    used_uniq_layer: false
+    use_num_codebook_layers: 0
+    missing_item_strategy: fallback_to_individual
+    apply_checkpoint: false
+
+embeddings: ${model.embedding_configs.${model.embedding_type}}
 
 preprocessor:
   _target_: generative_recommenders_pl.models.preprocessors.LearnablePositionalEmbeddingInputFeaturesPreprocessor

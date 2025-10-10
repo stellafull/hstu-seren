@@ -3,7 +3,7 @@
 # Run pre-training on Serendipity 2018 using only the relevance objective.
 
 defaults:
-  - override /data: amazon_movies
+  - override /data: amazon_books
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -13,10 +13,12 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 512
-  num_workers: 8
+  batch_size: 256
+  num_workers: 4
+  max_sequence_length: 50
 
-tags: ["ama_mv", "pretrain"]
+
+tags: ["ama_bk", "pretrain", "sid"]
 
 trainer:
   min_epochs: 20
@@ -24,7 +26,10 @@ trainer:
   
 
 model:
-  embedding_type: local  # set to "semantic_id" for SID ablations
+  embedding_type: semantic_id  # semantic ID embedding variant
+  embedding_configs:
+    semantic_id:
+      emb_comb_method: projgate
   ser_metrics: null
   seren_loss_weight: 0.0
   seren_score_alpha: 0.0
@@ -37,8 +42,8 @@ model:
   item_embedding_dim: 256
 
   sequence_encoder:
-    num_blocks: 8
-    num_heads: 4
+    num_blocks: 4
+    num_heads: 2
 
   optimizer:
     _target_: torch.optim.AdamW
@@ -60,16 +65,21 @@ model:
     interval: epoch
     frequency: 1
 
+  loss:
+    num_to_sample: 512
+
+  compile_model: true
+
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_books_sid
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: ama_mv_pretrain
-    version: null
+    name: ama_book_pretrain_sid
+    version: 2.0
   csv:
-    name: ama_mv_pretrain
+    name: ama_book_pretrain_sid

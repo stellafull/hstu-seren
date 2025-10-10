@@ -7,7 +7,7 @@ from typing import Any
 
 import hydra
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from generative_recommenders_pl.models.heads.seren_expert import SerendipityExpertHead
 from generative_recommenders_pl.models.indexing.candidate_index import CandidateIndex
@@ -28,7 +28,10 @@ from generative_recommenders_pl.models.utils.features import SequentialFeatures,
     seq_features_from_row
 from generative_recommenders_pl.utils.logger import RankedLogger
 from generative_recommenders_pl.data.reco_dataset import RecoDataModule
-from generative_recommenders_pl.models.embeddings.embeddings import EmbeddingModule
+from generative_recommenders_pl.models.embeddings import EmbeddingModule
+from generative_recommenders_pl.models.embeddings.embeddings_sid import (
+    LocalSIDEmbeddingModule,
+)
 from generative_recommenders_pl.models.losses.autoregressive_losses import (
     AutoregressiveLoss,
 )
@@ -38,6 +41,23 @@ from generative_recommenders_pl.models.losses.ser_losses import (
 import torchmetrics
 
 log = RankedLogger(__name__)
+
+
+def _resolve_item_lookup_path(datamodule: Any) -> str | None:
+    """Best-effort resolution of the item lookup CSV from the datamodule."""
+    if datamodule is None:
+        return None
+    data_preprocessor = getattr(datamodule, "data_preprocessor", None)
+    if data_preprocessor is None:
+        return None
+    lookup_fn = getattr(data_preprocessor, "item_lookup_csv", None)
+    if lookup_fn is None or not callable(lookup_fn):
+        return None
+    try:
+        return str(lookup_fn())
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log.debug("Failed to resolve item lookup path from datamodule: %s", exc)
+        return None
 
 
 class HSTUSeren(Retrieval):
@@ -69,7 +89,32 @@ class HSTUSeren(Retrieval):
         transfer_learning: dict[str, Any] | DictConfig | None = None,
         pretrained_checkpoint_path: str | None = None,
         load_strict: bool = False,
+        embedding_type: str = "local",
+        embedding_configs: DictConfig | dict | None = None,
+        semantic_id_prefix: str | None = None,
     ) -> None:
+        resolved_lookup_path: str | None = None
+        if embedding_type == "semantic_id":
+            resolved_lookup_path = _resolve_item_lookup_path(datamodule)
+
+        if isinstance(embeddings, DictConfig):
+            with open_dict(embeddings):
+                if (
+                    embedding_type == "semantic_id"
+                    and resolved_lookup_path
+                    and "item_lookup_path" not in embeddings
+                ):
+                    embeddings.item_lookup_path = resolved_lookup_path
+                if (
+                    embedding_type == "semantic_id"
+                    and "item_lookup_path" not in embeddings
+                    and resolved_lookup_path is None
+                ):
+                    log.warning(
+                        "Semantic ID embeddings configured without item_lookup_path; "
+                        "attempted datamodule resolution failed."
+                    )
+
         super().__init__(
             datamodule=datamodule,
             embeddings=embeddings,
@@ -88,6 +133,12 @@ class HSTUSeren(Retrieval):
             item_embedding_dim=item_embedding_dim,
             compile_model=compile_model,
         )
+
+        self.embedding_type: str = embedding_type
+        self.embedding_configs: DictConfig | dict | None = embedding_configs
+        self.semantic_id_prefix: str | None = semantic_id_prefix
+        self.embedding_debug_str: str | None = None
+        self._log_embedding_configuration()
 
         self.seren_expert: SerendipityExpertHead = self._init_seren_expert(
             seren_expert, item_embedding_dim
@@ -111,6 +162,33 @@ class HSTUSeren(Retrieval):
         if checkpoint_path:
             self._load_checkpoint_weights(checkpoint_path, strict=load_strict_flag)
         self._maybe_apply_transfer_learning(self._transfer_cfg)
+
+    def _log_embedding_configuration(self) -> None:
+        debug_str: str | None = None
+        if hasattr(self.embeddings, "debug_str") and callable(
+            getattr(self.embeddings, "debug_str")
+        ):
+            try:
+                debug_str = self.embeddings.debug_str()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.debug("Failed to obtain embedding debug string: %s", exc)
+        module_name = self.embeddings.__class__.__name__
+        if debug_str:
+            log.info(
+                "Using embedding module (%s): %s", module_name, debug_str
+            )
+        else:
+            log.info("Using embedding module: %s", module_name)
+        self.embedding_debug_str = debug_str
+        if self.embedding_type == "semantic_id" and not isinstance(
+            self.embeddings, LocalSIDEmbeddingModule
+        ):
+            log.warning(
+                "Embedding type configured as semantic_id but module is %s",
+                module_name,
+            )
+        if self.semantic_id_prefix:
+            log.info("Semantic ID prefix resolved to %s", self.semantic_id_prefix)
 
     def _init_seren_expert(
         self,
@@ -298,7 +376,20 @@ class HSTUSeren(Retrieval):
                 embeddings=self.embeddings.get_item_embeddings(in_batch_ids),
             )
         else:
-            self.negatives_sampler._item_emb = self.embeddings._item_emb
+            sampler_emb = getattr(self.embeddings, "_item_emb", None)
+            if sampler_emb is None:
+                if not hasattr(self, "_negatives_embedding_adapter"):
+                    class _EmbeddingAdapter(torch.nn.Module):
+                        def __init__(self, embedding_module: EmbeddingModule) -> None:
+                            super().__init__()
+                            self.embedding_module = embedding_module
+
+                        def forward(self, item_ids: torch.Tensor) -> torch.Tensor:
+                            return self.embedding_module.get_item_embeddings(item_ids)
+
+                    self._negatives_embedding_adapter = _EmbeddingAdapter(self.embeddings)
+                sampler_emb = self._negatives_embedding_adapter
+            self.negatives_sampler._item_emb = sampler_emb
 
         jagged_features = self.dense_to_jagged(
             lengths=seq_features.past_lengths,
@@ -368,7 +459,7 @@ class HSTUSeren(Retrieval):
         if apply_seren:
             candidate_embeddings = self.embeddings.get_item_embeddings(top_k_ids)
             ser_logits = self._compute_seren_logits(user_repr, candidate_embeddings)
-            ser_probs = torch.sigmoid(ser_logits)
+            ser_probs = torch.relu(ser_logits)
             combined_scores = base_scores + self.seren_score_alpha * ser_probs * ser_logits
             sort_indices = combined_scores.argsort(dim=1, descending=True)
             combined_scores = combined_scores.gather(1, sort_indices)

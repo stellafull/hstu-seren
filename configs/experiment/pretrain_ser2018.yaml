@@ -24,6 +24,7 @@ trainer:
   
 
 model:
+  embedding_type: local  # set to "semantic_id" for SID ablations
   ser_metrics: null
   seren_loss_weight: 0.0
   seren_score_alpha: 0.0
@@ -72,4 +73,3 @@ logger:
     version: null
   csv:
     name: ser2018_pretrain
-

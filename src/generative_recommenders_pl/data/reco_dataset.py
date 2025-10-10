@@ -269,6 +269,7 @@ class RecoDataModule(L.LightningDataModule):
         num_workers: Optional[int] = None,
         prefetch_factor: int = 4,
         pin_memory: bool = False,
+        semantic_id_prefix: str | None = None,
     ):
         super().__init__()
         self.__dict__.update(locals())
@@ -291,6 +292,7 @@ class RecoDataModule(L.LightningDataModule):
         self.num_workers = int(num_workers)
         self.prefetch = prefetch_factor if self.num_workers > 0 else None
         self.pin_memory = bool(pin_memory)
+        self.semantic_id_prefix = semantic_id_prefix
         self.__init_item_ids()
 
     def __init_item_ids(self):

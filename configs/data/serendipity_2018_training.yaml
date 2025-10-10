@@ -3,6 +3,7 @@
 
 _target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
 dataset_name: serendipity-2018
+semantic_id_prefix: serendipity_2018
 data_preprocessor:
   _target_: generative_recommenders_pl.data.preprocessor.MovielensDataProcessor
   ratings_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/training.csv
