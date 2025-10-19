@@ -1,11 +1,11 @@
 [project]
 name = "hstu-seren"
-version = "0.0.1"
+version = "0.1.1"
 description = "HSTU for serendipity recommendation"
 authors = [{ name = "czy", email = "chenzhiyuan0920@gmail.com" }]
 readme = "README.md"
 keywords = ['python']
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.10"
 dependencies = [
     # --------- pytorch / lightning --------- #
     "torch>=2.6.0",
@@ -61,174 +61,30 @@ dependencies = [
     "flash-attn<2.8.0",
     "pyarrow>=21.0.0",
 ]
-classifiers = [
-    "Intended Audience :: Developers",
-    "Programming Language :: Python",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-]
 
 [project.urls]
 Homepage = "https://stellafull.github.io/hstu-seren/"
 Repository = "https://github.com/stellafull/hstu-seren"
 Documentation = "https://stellafull.github.io/hstu-seren/"
 
-[tool.uv.extra-build-dependencies]
-# build flash-attention 2
-flash-attn = [
-  { requirement = "torch", match-runtime = true },
-  "ninja"
-]
-
 [project.optional-dependencies]
-cu124 = [
-  "torch==2.6.0+cu124",
-  "torchvision==0.21.0+cu124",
-  "torchaudio==2.6.0+cu124",
-  "fbgemm-gpu==1.1.0+cu124",
-  "torchrec==1.2.0",
-]
-
-cu129 = [
-  "torch==2.8.0+cu129",
-  "torchvision==0.23.0+cu129",
-  "torchaudio==2.8.0+cu129",
-  "fbgemm-gpu==1.3.0+cu129",
-  "torchrec==1.2.0",
-]
-
-[dependency-groups]
 dev = [
-    "pytest>=7.2.0",
-    "pre-commit>=2.20.0",
-    "tox-uv>=1.11.3",
-    "deptry>=0.23.0",
-    "mypy>=0.991",
-    
-    "ruff>=0.11.5",
-    
+    "ruff",
+    "black",
+    "pre-commit",
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+test = [
+    "pytest",
+    "coverage",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/generative_recommenders_pl"]
 
-[tool.mypy]
-files = ["src"]
-disallow_untyped_defs = true
-disallow_any_unimported = true
-no_implicit_optional = true
-check_untyped_defs = true
-warn_return_any = true
-warn_unused_ignores = true
-show_error_codes = true
+[tool.hatch.build.targets.editable]
+packages = ["src/generative_recommenders_pl"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = [
-  "--color=yes",
-  "--durations=0",
-  "--strict-markers",
-  "--doctest-modules",
-]
-filterwarnings = [
-  "ignore::UserWarning",
-]
-log_cli = "True"
-markers = [
-  "slow: slow tests",
-]
-minversion = "6.0"
-
-[tool.ruff]
-target-version = "py310"
-line-length = 120
-fix = true
-
-[tool.ruff.lint]
-select = [
-    # flake8-2020
-    "YTT",
-    # flake8-bandit
-    "S",
-    # flake8-bugbear
-    "B",
-    # flake8-builtins
-    "A",
-    # flake8-comprehensions
-    "C4",
-    # flake8-debugger
-    "T10",
-    # flake8-simplify
-    "SIM",
-    # isort
-    "I",
-    # mccabe
-    "C90",
-    # pycodestyle
-    "E", "W",
-    # pyflakes
-    "F",
-    # pygrep-hooks
-    "PGH",
-    # pyupgrade
-    "UP",
-    # ruff
-    "RUF",
-    # tryceratops
-    "TRY",
-]
-ignore = [
-    # LineTooLong
-    "E501",
-    # DoNotAssignLambda
-    "E731",
-    # Consider iterable unpacking instead of concatenation
-    "RUF005",
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
-
-[tool.ruff.format]
-preview = true
-
-[tool.uv]
-conflicts = [[{ extra = "cu129" }, { extra = "cu124" }]]
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu129", extra = "cu129" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-torchvision = [
-  { index = "pytorch-cu129", extra = "cu129" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-torchaudio = [
-  { index = "pytorch-cu129", extra = "cu129" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-fbgemm-gpu = [
-  { index = "pytorch-cu129", extra = "cu129" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
-
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
