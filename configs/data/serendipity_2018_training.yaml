@@ -1,5 +1,5 @@
 # @package data
-# pre-train dataset for serendipity-2018
+# pre-train dataset for serendipity-2018 (5-core variant)
 
 _target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
 dataset_name: serendipity-2018
@@ -11,6 +11,7 @@ data_preprocessor:
   prefix: serendipity-2018
   output_root: ${paths.root_dir}/tmp/pre_train
   min_sequence_length: 5
+  min_presence: 5
 train_dataset:
   _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
   ignore_last_n: 1
@@ -24,7 +25,7 @@ test_dataset:
   ignore_last_n: 0
   shift_id_by: 1
 max_sequence_length: 200
-chronological: false
+chronological: true
 positional_sampling_ratio: 1.0
 batch_size: 128
 num_workers: 8
