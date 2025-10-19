@@ -1,9 +1,9 @@
 # @package _global_
 
-# SerenLens books with serendipity supervision, only relevance task loss on hstu
+# Run pre-training on the Serendipity 2018 long-tail split using the semantic ID encoder.
 
 defaults:
-  - override /data: serenlens_books_experiment
+  - override /data: serendipity_2018_training_long_tail
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -14,28 +14,34 @@ seed: 42
 
 data:
   batch_size: 128
-  num_workers: 48
+  num_workers: 8
   max_sequence_length: 200
 
-
-tags: ["serenlens_books", "experiment"]
+tags: ["ser2018", "pretrain", "long_tail", "sid"]
 
 trainer:
-  min_epochs: 99
+  min_epochs: 20
   max_epochs: 100
 
 model:
-  embedding_type: local  # set to "semantic_id" for SID ablations
-  seren_loss_weight: 0
-  seren_score_alpha: 0
-  seren_loss:
-    pos_weight: 20
+  embedding_type: semantic_id  # semantic ID embedding variant
+  embedding_configs:
+    semantic_id:
+      emb_comb_method: projgate
+  ser_metrics: null
+  seren_loss_weight: 0.0
+  seren_score_alpha: 0.0
+
+  transfer_learning:
+    enabled: false
+
+  pretrained_checkpoint_path: null
   load_strict: false
   item_embedding_dim: 256
 
   sequence_encoder:
-    num_blocks: 4
-    num_heads: 2
+    num_blocks: 8
+    num_heads: 4
 
   optimizer:
     _target_: torch.optim.AdamW
@@ -57,18 +63,21 @@ model:
     interval: epoch
     frequency: 1
 
+  loss:
+    num_to_sample: 128
+
   compile_model: true
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/serenlens_books_experiment_hstu
+    dirpath: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018_long_tail_sid
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: serenlens_books_experiment
-    version: null
+    name: ser2018_pretrain_long_tail
+    version: 0
   csv:
-    name: serenlens_books_experiment
+    name: ser2018_pretrain_long_tail

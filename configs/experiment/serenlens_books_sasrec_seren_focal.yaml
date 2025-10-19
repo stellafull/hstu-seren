@@ -1,10 +1,10 @@
 # @package _global_
 
-# SerenLens books with serendipity supervision, only relevance task loss on hstu
+# SASRec SerenLens books with serendipity supervision using focal loss.
 
 defaults:
   - override /data: serenlens_books_experiment
-  - override /model: hstu_seren
+  - override /model: sas_rec_seren
   - override /callbacks: default
   - override /logger: many_loggers
   - override /trainer: default
@@ -13,23 +13,27 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 128
-  num_workers: 48
-  max_sequence_length: 200
+  batch_size: 256
+  num_workers: 8
+  max_sequence_length: 50
 
-
-tags: ["serenlens_books", "experiment"]
+tags: ["serenlens_books", "experiment", "seren_focal"]
 
 trainer:
   min_epochs: 99
   max_epochs: 100
 
 model:
-  embedding_type: local  # set to "semantic_id" for SID ablations
-  seren_loss_weight: 0
-  seren_score_alpha: 0
+  seren_loss_weight: 0.2
+  seren_score_alpha: 1.0
+
   seren_loss:
+    _target_: generative_recommenders_pl.models.losses.ser_losses.SerendipityFocalLoss
+    reduction: mean
+    gamma: 2.0
+    alpha: 0.25
     pos_weight: 20
+
   load_strict: false
   item_embedding_dim: 256
 
@@ -42,7 +46,7 @@ model:
     _partial_: true
     lr: 0.001
     betas: [0.9, 0.98]
-    weight_decay: 0.001
+    weight_decay: 0.0001
 
   scheduler:
     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
@@ -53,22 +57,27 @@ model:
     threshold: 1e-4
 
   configure_optimizer_params:
-    monitor: val/ndcg@100
+    monitor: val/ndcg_ser@100
     interval: epoch
     frequency: 1
+
+  loss:
+    softmax_temperature: 0.1
+
+
 
   compile_model: true
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/serenlens_books_experiment_hstu
+    dirpath: ${paths.root_dir}/tmp/checkpoints/serenlens_books_sasrec_seren_focal
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: serenlens_books_experiment
+    name: serenlens_books_experiment_sasrec_seren_focal
     version: null
   csv:
-    name: serenlens_books_experiment
+    name: serenlens_books_experiment_sasrec_seren_focal
