@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from generative_recommenders_pl.models.embeddings.embeddings import EmbeddingModule
@@ -337,15 +338,22 @@ class LocalSIDEmbeddingModule(EmbeddingModule):
                 return self.weight_alpha * embs1 + (1 - self.weight_alpha) * embs2
 
         elif method == "projgate":
-            self._emb_comb_proj_gate = torch.nn.Linear(
+            self._emb_proj = torch.nn.Linear(
                 self._item_embedding_dim * 2, self._item_embedding_dim
             )
+            self._emb_gate = torch.nn.Linear(
+                self._item_embedding_dim * 2, self._item_embedding_dim
+            )
+            if self._emb_gate.bias is not None:
+                torch.nn.init.constant_(self._emb_gate.bias, -1.0)
+            self._gate_dropout_p = 0.10
 
             def combiner(embs1: torch.Tensor, embs2: torch.Tensor) -> torch.Tensor:
                 concat = torch.cat((embs1, embs2), dim=-1)
-                fused = self._emb_comb_proj_gate(concat)
-                gate = torch.sigmoid(self._emb_comb_proj_gate(concat))
-                return gate * fused + (1 - gate) * embs2
+                gate = torch.sigmoid(self._emb_gate(concat))
+                gate = F.dropout(gate, p=self._gate_dropout_p, training=self.training)
+                fused = self._emb_proj(concat)
+                return gate * fused + (1.0 - gate) * embs2
 
         else:
             raise ValueError(
