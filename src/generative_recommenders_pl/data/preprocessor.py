@@ -260,6 +260,7 @@ class MovielensDataProcessor(DataProcessor):
         *,
         movies_path: str | Path | None = None,
         min_sequence_length: int = 1,
+        min_presence: int = 1,
         expected_num_unique_items: Optional[int] = None,
         expected_max_item_id: Optional[int] = None,
         output_root: str | Path | None = None,
@@ -280,6 +281,7 @@ class MovielensDataProcessor(DataProcessor):
         self._ratings_path = Path(ratings_path)
         self._movies_path = Path(movies_path) if movies_path else None
         self._min_sequence_length = max(1, min_sequence_length)
+        self._min_presence = max(1, min_presence)
         self._extra_sequence_columns = extra_sequence_columns or {}
 
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
@@ -312,6 +314,28 @@ class MovielensDataProcessor(DataProcessor):
 
         ratings = self._transform_ratings(ratings)
         ratings = ratings[required + list(self._extra_sequence_columns.keys())]
+
+        if self._min_presence > 1:
+            initial_rows = ratings.shape[0]
+            item_counts = ratings["item_id"].value_counts()
+            user_counts = ratings["user_id"].value_counts()
+            mask = (ratings["item_id"].map(item_counts) >= self._min_presence) & (
+                ratings["user_id"].map(user_counts) >= self._min_presence
+            )
+            ratings = ratings.loc[mask].reset_index(drop=True)
+            filtered_rows = ratings.shape[0]
+            if filtered_rows == 0:
+                raise ValueError(
+                    f"No ratings remaining after applying min_presence={self._min_presence}"
+                )
+            if filtered_rows != initial_rows:
+                log.info(
+                    "%s applied min_presence=%s filter (%s -> %s rows)",
+                    self._prefix,
+                    self._min_presence,
+                    initial_rows,
+                    filtered_rows,
+                )
 
         ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
         ratings["timestamp"] = pd.to_numeric(ratings["timestamp"], errors="coerce")
@@ -401,6 +425,7 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         use_training_initial_entries: bool = True,
         use_movies_initial_entries: bool = True,
         serendipity_columns: Optional[list[str]] = None,
+        min_presence: int = 1,
     ) -> None:
         self._ser_columns = serendipity_columns or [
             "s_ser_find",
@@ -427,6 +452,7 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             lookup_root=lookup_root,
             output_dirname=output_dirname,
             lookup_dirname=lookup_dirname,
+            min_presence=min_presence,
             extra_sequence_columns={"ser_label": "sequence_ser_label"},
         )
 
