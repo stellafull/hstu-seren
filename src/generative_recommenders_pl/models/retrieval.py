@@ -164,8 +164,16 @@ class Retrieval(GenerativeRecommenders):
         for k, v in results.items():
             self.log(f"val/{k}", v, on_epoch=True, prog_bar=True, logger=True)
         self.metrics.reset()
-        if "monitor" in self.configure_optimizer_params:
-            return results[self.configure_optimizer_params["monitor"].split("/")[1]]
+        monitor_cfg = self.configure_optimizer_params.get("monitor")
+        if monitor_cfg:
+            monitor_key = monitor_cfg.split("/", 1)[-1]
+            if monitor_key in results:
+                return results[monitor_key]
+            log.debug(
+                "Monitor key %s not found in retrieval metrics; returning None",
+                monitor_key,
+            )
+        return None
 
     def on_test_epoch_start(self) -> None:
         """Lightning calls this at the beginning of the test epoch."""
@@ -196,8 +204,16 @@ class Retrieval(GenerativeRecommenders):
         for k, v in results.items():
             self.log(f"test/{k}", v, on_epoch=True, prog_bar=True, logger=True)
         self.metrics.reset()
-        if "monitor" in self.configure_optimizer_params:
-            return results[self.configure_optimizer_params["monitor"].split("/")[1]]
+        monitor_cfg = self.configure_optimizer_params.get("monitor")
+        if monitor_cfg:
+            monitor_key = monitor_cfg.split("/", 1)[-1]
+            if monitor_key in results:
+                return results[monitor_key]
+            log.debug(
+                "Monitor key %s not found in retrieval metrics; returning None",
+                monitor_key,
+            )
+        return None
 
     def on_predict_epoch_start(self) -> None:
         """Lightning calls this at the beginning of the predict epoch."""

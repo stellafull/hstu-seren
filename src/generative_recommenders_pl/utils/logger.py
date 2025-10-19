@@ -1,23 +1,7 @@
 import logging
 from typing import Mapping, Optional
 
-# Provide a lightweight fallback for torch when not installed
-try:  # pragma: no cover - runtime convenience
-    import torch  # type: ignore
-except Exception:  # pragma: no cover
-    class _DummyDist:
-        @staticmethod
-        def is_initialized() -> bool:
-            return False
-
-        @staticmethod
-        def get_rank() -> int:
-            return 0
-
-    class _DummyTorch:
-        distributed = _DummyDist()
-
-    torch = _DummyTorch()  # type: ignore
+import torch
 
 
 class RankedLogger(logging.LoggerAdapter):
@@ -62,9 +46,7 @@ class RankedLogger(logging.LoggerAdapter):
             return f"[rank: {rank}] {message}"
         return message
 
-    def log(
-        self, level: int, msg: str, *args, **kwargs
-    ) -> None:
+    def log(self, level: int, msg: str, *args, **kwargs) -> None:
         """Delegate a log call to the underlying logger, after prefixing its message with the rank
         of the process it's being logged from. If `'rank'` is provided, then the log will only
         occur on that rank/process.
@@ -73,7 +55,8 @@ class RankedLogger(logging.LoggerAdapter):
             level: The level to log at. Look at `logging.__init__.py` for more information.
             msg: The message to log.
             args: Additional args to pass to the underlying logging function.
-            kwargs: Any additional keyword args to pass to the underlying logging function.
+            kwargs: Any additional keyword args to pass to the underlying logging function. A
+                ``rank`` keyword may be provided to restrict logging to a specific rank.
         """
         rank: Optional[int] = kwargs.pop("rank", None)
         if self.isEnabledFor(level):

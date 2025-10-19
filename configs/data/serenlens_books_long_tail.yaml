@@ -1,0 +1,33 @@
+# @package data
+# tuning dataset for SerenLens books (long-tail aware variant)
+
+_target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
+dataset_name: serenlens_books_long_tail
+semantic_id_prefix: amazon_books
+data_preprocessor:
+  _target_: generative_recommenders_pl.data.preprocessor.SerenLensDataProcessor
+  ratings_path: ${paths.root_dir}/tmp/amzn_books_2015/SerenLens_Books.csv
+  prefix: amazon_books_long_tail
+  output_root: ${paths.root_dir}/tmp/tuning
+  output_dirname: serenlens_books_long_tail
+  lookup_root: ${paths.root_dir}/tmp/pre_train
+  lookup_dirname: amazon_books_long_tail
+  min_sequence_length: 5
+train_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 1
+  shift_id_by: 1
+val_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+test_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+max_sequence_length: 200
+chronological: true
+positional_sampling_ratio: 1.0
+batch_size: 1024
+num_workers: 8
+prefetch_factor: 2

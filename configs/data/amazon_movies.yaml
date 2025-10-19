@@ -3,6 +3,7 @@
 
 _target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
 dataset_name: amazon_movies
+semantic_id_prefix: amazon_movies
 data_preprocessor:
   _target_: generative_recommenders_pl.data.preprocessor.AmazonDataProcessor
   ratings_path: ${paths.root_dir}/tmp/amzn_mv_2015/ratings_Movies_and_TV.csv
@@ -24,8 +25,8 @@ test_dataset:
   ignore_last_n: 0
   shift_id_by: 1
 max_sequence_length: 200
-chronological: false
+chronological: true
 positional_sampling_ratio: 1.0
-batch_size: 128
+batch_size: 1024
 num_workers: 8
 prefetch_factor: 2

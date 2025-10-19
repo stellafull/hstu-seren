@@ -168,113 +168,6 @@ def _build_sequence_frame(
             seq_df[target] = seq_df[target].apply(_format_sequence)
 
     return seq_df, lengths
-
-
-def _apply_ser_loo(
-    sequences: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.Series, dict[str, int]]:
-    """Trim user sequences so the last interaction is the most recent ser=1."""
-
-    if "sequence_ser_label" not in sequences.columns:
-        raise ValueError("Ser-LOO requires a sequence_ser_label column in sequences")
-
-    sequence_columns = [col for col in sequences.columns if col.startswith("sequence_")]
-    kept_rows: list[pd.Series] = []
-    ser_lengths: list[int] = []
-    dropped_users = 0
-    truncated_users = 0
-
-    def _split_sequence(raw: str) -> list[str]:
-        if pd.isna(raw) or raw == "":
-            return []
-        return str(raw).split(",")
-
-    def _is_ser_positive(token: str) -> bool:
-        normalized = token.strip().lower()
-        if not normalized:
-            return False
-        if normalized in {"1", "true", "t", "yes"}:
-            return True
-        try:
-            return float(normalized) == 1.0
-        except ValueError:
-            return False
-
-    for _, row in sequences.iterrows():
-        ser_labels = _split_sequence(row["sequence_ser_label"])
-        ser_index = None
-        for idx in range(len(ser_labels) - 1, -1, -1):
-            if _is_ser_positive(ser_labels[idx]):
-                ser_index = idx
-                break
-        if ser_index is None:
-            dropped_users += 1
-            continue
-
-        trim_length = ser_index + 1
-        truncated = len(ser_labels) > trim_length
-
-        new_row = row.copy()
-        for column in sequence_columns:
-            values = _split_sequence(row[column])
-            if len(values) < trim_length:
-                raise ValueError(
-                    "Sequence columns have mismatched lengths for user"
-                )
-            trimmed_values = values[:trim_length]
-            new_row[column] = ",".join(trimmed_values)
-
-        kept_rows.append(new_row)
-        ser_lengths.append(trim_length)
-        if truncated:
-            truncated_users += 1
-
-    if kept_rows:
-        trimmed_sequences = pd.DataFrame(kept_rows).reset_index(drop=True)
-        lengths = pd.Series(ser_lengths, dtype="int64")
-    else:
-        trimmed_sequences = pd.DataFrame(columns=sequences.columns)
-        lengths = pd.Series(dtype="int64")
-    stats = {"dropped": dropped_users, "truncated": truncated_users}
-    return trimmed_sequences, lengths, stats
-
-
-def _enforce_ser_loo_alignment(
-    ratings: pd.DataFrame,
-    sequences: pd.DataFrame,
-    *,
-    min_length: int = 1,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, dict[str, int]]:
-    trimmed_sequences, lengths, stats = _apply_ser_loo(sequences)
-
-    if trimmed_sequences.empty:
-        empty_ratings = ratings.iloc[0:0].reset_index(drop=True)
-        return empty_ratings, trimmed_sequences, lengths, stats
-
-    if min_length > 1 and not lengths.empty:
-        mask = lengths >= min_length
-        if not mask.all():
-            removed = int((~mask).sum())
-            stats["length_filtered"] = stats.get("length_filtered", 0) + removed
-        trimmed_sequences = trimmed_sequences.loc[mask].reset_index(drop=True)
-        lengths = lengths.loc[mask].reset_index(drop=True)
-        if trimmed_sequences.empty:
-            empty_ratings = ratings.iloc[0:0].reset_index(drop=True)
-            return empty_ratings, trimmed_sequences, lengths, stats
-
-    keep_map = dict(zip(trimmed_sequences["user_id"], lengths))
-    ratings_sorted = ratings.sort_values(by=["user_id", "timestamp"])
-    ratings_sorted["_ser_rank"] = ratings_sorted.groupby("user_id").cumcount() + 1
-    ratings_filtered = ratings_sorted[ratings_sorted["user_id"].isin(keep_map)]
-    ratings_filtered = ratings_filtered[
-        ratings_filtered["_ser_rank"] <= ratings_filtered["user_id"].map(keep_map)
-    ]
-    ratings_filtered = ratings_filtered.drop(columns="_ser_rank")
-    ratings_filtered.reset_index(drop=True, inplace=True)
-
-    return ratings_filtered, trimmed_sequences, lengths, stats
-
-
 class DataProcessor(abc.ABC):
     """Base preprocessor that materializes SASRec-style sequential data."""
 
@@ -286,21 +179,24 @@ class DataProcessor(abc.ABC):
         *,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
     ) -> None:
         self._prefix = prefix
         self._expected_num_unique_items = expected_num_unique_items
         self._expected_max_item_id = expected_max_item_id
         self._output_root = Path(output_root) if output_root is not None else DEFAULT_PRETRAIN_ROOT
         self._lookup_root = Path(lookup_root) if lookup_root is not None else self._output_root
-        self._apply_ser_loo = False
+        self._output_dirname = str(output_dirname) if output_dirname is not None else prefix
+        self._lookup_dirname = str(lookup_dirname) if lookup_dirname is not None else prefix
         self._output_root.mkdir(parents=True, exist_ok=True)
         self._lookup_root.mkdir(parents=True, exist_ok=True)
 
     def output_dir(self) -> Path:
-        return self._output_root / self._prefix
+        return self._output_root / self._output_dirname
 
     def lookup_dir(self) -> Path:
-        return self._lookup_root / self._prefix
+        return self._lookup_root / self._lookup_dirname
 
     def output_format_csv(self) -> str:
         return str(self.output_dir() / "sasrec_format.csv")
@@ -318,10 +214,38 @@ class DataProcessor(abc.ABC):
         self.output_dir().mkdir(parents=True, exist_ok=True)
 
     def expected_num_unique_items(self) -> Optional[int]:
+        self._ensure_item_statistics()
         return self._expected_num_unique_items
 
     def expected_max_item_id(self) -> Optional[int]:
+        self._ensure_item_statistics()
         return self._expected_max_item_id
+
+    def _ensure_item_statistics(self) -> None:
+        if (
+            self._expected_num_unique_items is not None
+            and self._expected_max_item_id is not None
+        ):
+            return
+        lookup_path = Path(self.item_lookup_csv())
+        if not Path(lookup_path).exists():
+            return
+        try:
+            lookup = pd.read_csv(lookup_path)
+        except Exception as exc:  # pragma: no cover - informative fallback
+            log.warning(
+                "%s failed to load item lookup metadata: %s",
+                self._prefix,
+                exc,
+            )
+            return
+        if self._expected_num_unique_items is None:
+            self._expected_num_unique_items = int(lookup.shape[0])
+        if (
+            self._expected_max_item_id is None
+            and "normalized_item_id" in lookup.columns
+        ):
+            self._expected_max_item_id = int(lookup["normalized_item_id"].max())
 
     @abc.abstractmethod
     def preprocess_rating(self) -> int:
@@ -336,12 +260,14 @@ class MovielensDataProcessor(DataProcessor):
         *,
         movies_path: str | Path | None = None,
         min_sequence_length: int = 1,
+        min_presence: int = 1,
         expected_num_unique_items: Optional[int] = None,
         expected_max_item_id: Optional[int] = None,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
         extra_sequence_columns: Optional[dict[str, str]] = None,
-        apply_ser_loo: bool = False,
     ) -> None:
         super().__init__(
             prefix,
@@ -349,12 +275,14 @@ class MovielensDataProcessor(DataProcessor):
             expected_max_item_id=expected_max_item_id,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
         self._ratings_path = Path(ratings_path)
         self._movies_path = Path(movies_path) if movies_path else None
         self._min_sequence_length = max(1, min_sequence_length)
+        self._min_presence = max(1, min_presence)
         self._extra_sequence_columns = extra_sequence_columns or {}
-        self._apply_ser_loo = apply_ser_loo
 
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         return ratings
@@ -386,6 +314,28 @@ class MovielensDataProcessor(DataProcessor):
 
         ratings = self._transform_ratings(ratings)
         ratings = ratings[required + list(self._extra_sequence_columns.keys())]
+
+        if self._min_presence > 1:
+            initial_rows = ratings.shape[0]
+            item_counts = ratings["item_id"].value_counts()
+            user_counts = ratings["user_id"].value_counts()
+            mask = (ratings["item_id"].map(item_counts) >= self._min_presence) & (
+                ratings["user_id"].map(user_counts) >= self._min_presence
+            )
+            ratings = ratings.loc[mask].reset_index(drop=True)
+            filtered_rows = ratings.shape[0]
+            if filtered_rows == 0:
+                raise ValueError(
+                    f"No ratings remaining after applying min_presence={self._min_presence}"
+                )
+            if filtered_rows != initial_rows:
+                log.info(
+                    "%s applied min_presence=%s filter (%s -> %s rows)",
+                    self._prefix,
+                    self._min_presence,
+                    initial_rows,
+                    filtered_rows,
+                )
 
         ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
         ratings["timestamp"] = pd.to_numeric(ratings["timestamp"], errors="coerce")
@@ -430,32 +380,6 @@ class MovielensDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns=self._extra_sequence_columns,
         )
-        if self._apply_ser_loo and not seq_df.empty:
-            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
-                ratings,
-                seq_df,
-                min_length=self._min_sequence_length,
-            )
-            if ser_stats["dropped"]:
-                log.info(
-                    "%s Ser-LOO removed %s users without ser interactions",
-                    self._prefix,
-                    ser_stats["dropped"],
-                )
-            if ser_stats["truncated"]:
-                log.info(
-                    "%s Ser-LOO truncated post-ser interactions for %s users",
-                    self._prefix,
-                    ser_stats["truncated"],
-                )
-            length_filtered = ser_stats.get("length_filtered", 0)
-            if length_filtered:
-                log.info(
-                    "%s Ser-LOO dropped %s users below min_length=%s",
-                    self._prefix,
-                    length_filtered,
-                    self._min_sequence_length,
-                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",
@@ -496,7 +420,12 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         min_sequence_length: int = 1,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
+        use_training_initial_entries: bool = True,
+        use_movies_initial_entries: bool = True,
         serendipity_columns: Optional[list[str]] = None,
+        min_presence: int = 1,
     ) -> None:
         self._ser_columns = serendipity_columns or [
             "s_ser_find",
@@ -512,6 +441,8 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             )
         self._training_path = Path(training_path)
         self._cached_training_user_ids: list[str] | None = None
+        self._use_training_initial_entries = bool(use_training_initial_entries)
+        self._use_movies_initial_entries = bool(use_movies_initial_entries)
         super().__init__(
             ratings_path,
             prefix,
@@ -519,11 +450,15 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             min_sequence_length=min_sequence_length,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
+            min_presence=min_presence,
             extra_sequence_columns={"ser_label": "sequence_ser_label"},
-            apply_ser_loo=True,
         )
 
     def _user_lookup_initial_entries(self) -> Iterable[str] | None:
+        if not self._use_training_initial_entries:
+            return None
         if self._cached_training_user_ids is not None:
             return self._cached_training_user_ids
         if not self._training_path.exists():
@@ -561,6 +496,11 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
         )
         return self._cached_training_user_ids
 
+    def _item_lookup_initial_entries(self) -> Iterable[str] | None:
+        if not self._use_movies_initial_entries:
+            return None
+        return super()._item_lookup_initial_entries()
+
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         missing = [col for col in self._ser_columns if col not in ratings.columns]
         if missing:
@@ -588,6 +528,8 @@ class AmazonDataProcessor(DataProcessor):
         expected_num_unique_items: Optional[int] = None,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
         extra_sequence_columns: Optional[dict[str, str]] = None,
     ) -> None:
         super().__init__(
@@ -596,6 +538,8 @@ class AmazonDataProcessor(DataProcessor):
             expected_max_item_id=None,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
         self._ratings_path = Path(ratings_path)
         self._serenlens_path = Path(serenlens_path)
@@ -701,32 +645,6 @@ class AmazonDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns=self._extra_sequence_columns,
         )
-        if self._apply_ser_loo and not seq_df.empty:
-            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
-                ratings,
-                seq_df,
-                min_length=self._min_sequence_length,
-            )
-            if ser_stats["dropped"]:
-                log.info(
-                    "%s Ser-LOO removed %s users without ser interactions",
-                    self._prefix,
-                    ser_stats["dropped"],
-                )
-            if ser_stats["truncated"]:
-                log.info(
-                    "%s Ser-LOO truncated post-ser interactions for %s users",
-                    self._prefix,
-                    ser_stats["truncated"],
-                )
-            length_filtered = ser_stats.get("length_filtered", 0)
-            if length_filtered:
-                log.info(
-                    "%s Ser-LOO dropped %s users below min_length=%s",
-                    self._prefix,
-                    length_filtered,
-                    self._min_sequence_length,
-                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",
@@ -766,6 +684,8 @@ class SerenLensDataProcessor(DataProcessor):
         min_sequence_length: int = 1,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
+        output_dirname: str | None = None,
+        lookup_dirname: str | None = None,
     ) -> None:
         super().__init__(
             prefix,
@@ -773,8 +693,9 @@ class SerenLensDataProcessor(DataProcessor):
             expected_max_item_id=None,
             output_root=output_root,
             lookup_root=lookup_root,
+            output_dirname=output_dirname,
+            lookup_dirname=lookup_dirname,
         )
-        self._apply_ser_loo = True
         self._ratings_path = Path(ratings_path)
         self._min_sequence_length = max(1, min_sequence_length)
 
@@ -842,32 +763,6 @@ class SerenLensDataProcessor(DataProcessor):
             min_length=self._min_sequence_length,
             extra_sequence_columns={"label": "sequence_ser_label"},
         )
-        if self._apply_ser_loo and not seq_df.empty:
-            ratings, seq_df, lengths, ser_stats = _enforce_ser_loo_alignment(
-                ratings,
-                seq_df,
-                min_length=self._min_sequence_length,
-            )
-            if ser_stats["dropped"]:
-                log.info(
-                    "%s Ser-LOO removed %s users without ser interactions",
-                    self._prefix,
-                    ser_stats["dropped"],
-                )
-            if ser_stats["truncated"]:
-                log.info(
-                    "%s Ser-LOO truncated post-ser interactions for %s users",
-                    self._prefix,
-                    ser_stats["truncated"],
-                )
-            length_filtered = ser_stats.get("length_filtered", 0)
-            if length_filtered:
-                log.info(
-                    "%s Ser-LOO dropped %s users below min_length=%s",
-                    self._prefix,
-                    length_filtered,
-                    self._min_sequence_length,
-                )
         if not lengths.empty:
             log.info(
                 "%s sequence length stats min=%s max=%s mean=%.2f median=%.2f",

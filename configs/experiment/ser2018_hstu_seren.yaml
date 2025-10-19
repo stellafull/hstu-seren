@@ -1,0 +1,80 @@
+# @package _global_
+
+# Fine-tune on Serendipity 2018 answers with serendipity supervision.
+
+defaults:
+  - override /data: serendipity_2018_answers_experiment
+  - override /model: hstu_seren
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
+
+seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 8
+  max_sequence_length: 10
+
+tags: ["ser2018_hstu_seren", "experiment"]
+
+trainer:
+  min_epochs: 99
+  max_epochs: 100
+
+model:
+  embedding_type: local  # set to "semantic_id" for SID ablations
+  seren_loss_weight: 2
+  seren_score_alpha: 10
+  seren_loss:
+    pos_weight: 8
+  transfer_learning:
+    enabled: false
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/ser2018_hstu_seren/last.ckpt
+    strict: false
+    freeze_backbone: false
+    freeze_modules: []
+    unfreeze_modules: []
+  load_strict: false
+  item_embedding_dim: 256
+
+  sequence_encoder:
+    num_blocks: 8
+    num_heads: 4
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 0.001
+    betas: [0.9, 0.98]
+    weight_decay: 0.001
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    _partial_: true
+    mode: max
+    factor: 0.1
+    patience: 10
+    threshold: 1e-4
+
+  configure_optimizer_params:
+    monitor: val/ndcg@10
+    interval: epoch
+    frequency: 1
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/ser2018_hstu_seren
+    filename: "epoch_{epoch:03d}"
+    save_last: true
+    save_top_k: 0
+
+compile_model: true
+
+logger:
+  tensorboard:
+    name: ser2018_hstu_seren_experiment
+    version: null
+  csv:
+    name: ser2018_hstu_seren_experiment

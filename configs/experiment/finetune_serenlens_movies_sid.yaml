@@ -1,0 +1,83 @@
+# @package _global_
+
+# Fine-tune on SerenLens movies with serendipity supervision.
+
+defaults:
+  - override /data: serenlens_movies
+  - override /model: hstu_seren
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
+
+seed: 42
+
+data:
+  batch_size: 128
+  num_workers: 48
+
+
+tags: ["serenlens_movies", "finetune"]
+
+trainer:
+  min_epochs: 99
+  max_epochs: 100
+
+model:
+  embedding_type: semantic_id
+  embedding_configs:
+    semantic_id:
+      emb_comb_method: projgate
+  seren_loss_weight: 0.2
+  seren_score_alpha: 2
+  seren_loss:
+    pos_weight: 20
+  transfer_learning:
+    enabled: true
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/amazon_movies_sid/last.ckpt
+    strict: false
+    freeze_backbone: false
+    freeze_modules: []
+    unfreeze_modules: []
+  load_strict: false
+  item_embedding_dim: 256
+
+  sequence_encoder:
+    num_blocks: 8
+    num_heads: 4
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 0.0001
+    betas: [0.9, 0.98]
+    weight_decay: 0.00001
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    _partial_: true
+    mode: max
+    factor: 0.1
+    patience: 5
+    threshold: 1e-4
+
+  configure_optimizer_params:
+    monitor: val/ndcg_ser@10
+    interval: epoch
+    frequency: 1
+
+  compile_model: true
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_serenlens_movies_sid
+    filename: "epoch_{epoch:03d}"
+    save_last: true
+    save_top_k: 0
+
+logger:
+  tensorboard:
+    name: serenlens_movies_finetune_sid
+    version: 1
+  csv:
+    name: serenlens_movies_finetune_sid

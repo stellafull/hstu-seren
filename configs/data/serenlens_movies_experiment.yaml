@@ -1,0 +1,31 @@
+# @package data
+# experiment dataset for serenlens movies
+
+_target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
+dataset_name: serenlens_movies
+semantic_id_prefix: amazon_movies
+data_preprocessor:
+  _target_: generative_recommenders_pl.data.preprocessor.SerenLensDataProcessor
+  ratings_path: ${paths.root_dir}/tmp/amzn_mv_2015/SerenLens_Movies.csv
+  prefix: amazon_movies
+  output_root: ${paths.root_dir}/tmp/experiment
+  output_dirname: serenlens_movies
+  min_sequence_length: 2
+train_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 1
+  shift_id_by: 1
+val_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+test_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+max_sequence_length: 200
+chronological: true
+positional_sampling_ratio: 1.0
+batch_size: 1024
+num_workers: 8
+prefetch_factor: 2

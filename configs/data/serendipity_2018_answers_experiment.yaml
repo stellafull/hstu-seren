@@ -1,0 +1,36 @@
+# @package data
+# experiment dataset for serendipity 2018 answers split
+
+_target_: generative_recommenders_pl.data.reco_dataset.RecoDataModule
+dataset_name: serendipity-2018-answers
+semantic_id_prefix: serendipity_2018
+data_preprocessor:
+  _target_: generative_recommenders_pl.data.preprocessor.SerendipityAnswersDataProcessor
+  ratings_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/answers.csv
+  movies_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/movies.csv
+  training_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/training.csv
+  prefix: serendipity-2018
+  output_root: ${paths.root_dir}/tmp/experiment
+  output_dirname: serendipity_2018_answers
+  lookup_dirname: serendipity_2018_answers
+  use_training_initial_entries: false
+  use_movies_initial_entries: false
+  min_sequence_length: 2
+train_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 1
+  shift_id_by: 1
+val_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+test_dataset:
+  _target_: generative_recommenders_pl.data.reco_dataset.RecoDataset
+  ignore_last_n: 0
+  shift_id_by: 1
+max_sequence_length: 200
+chronological: true
+positional_sampling_ratio: 1.0
+batch_size: 1024
+num_workers: 8
+prefetch_factor: 2

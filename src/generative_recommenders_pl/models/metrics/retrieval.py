@@ -1,6 +1,6 @@
 import torch
 import torchmetrics
-import torchmetrics.utilities
+import torchmetrics.utilities.data
 
 
 class RetrievalMetrics(torchmetrics.Metric):
@@ -39,8 +39,8 @@ class RetrievalMetrics(torchmetrics.Metric):
 
     def compute(self):
         # Concatenate the lists of tensors
-        top_k_ids = torchmetrics.utilities.dim_zero_cat(self.top_k_ids)
-        target_ids = torchmetrics.utilities.dim_zero_cat(self.target_ids)
+        top_k_ids = torchmetrics.utilities.data.dim_zero_cat(self.top_k_ids)
+        target_ids = torchmetrics.utilities.data.dim_zero_cat(self.target_ids)
 
         assert top_k_ids.size(1) == self.k
         _, rank_indices = torch.max(

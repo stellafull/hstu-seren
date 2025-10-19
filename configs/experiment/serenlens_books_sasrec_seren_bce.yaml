@@ -1,0 +1,81 @@
+# @package _global_
+
+# SASRec SerenLens books with serendipity supervision using BCE loss.
+
+defaults:
+  - override /data: serenlens_books_experiment
+  - override /model: sas_rec_seren
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
+
+seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 8
+  max_sequence_length: 50
+
+tags: ["serenlens_books", "experiment", "seren_bce"]
+
+trainer:
+  min_epochs: 99
+  max_epochs: 100
+
+model:
+  seren_loss_weight: 0.2
+  seren_score_alpha: 1.0
+
+  seren_loss:
+    _target_: generative_recommenders_pl.models.losses.ser_losses.SerendipityBCELoss
+    reduction: mean
+    pos_weight: 20
+
+  load_strict: false
+  item_embedding_dim: 256
+
+  sequence_encoder:
+    num_blocks: 4
+    num_heads: 2
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 0.001
+    betas: [0.9, 0.98]
+    weight_decay: 0.0001
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    _partial_: true
+    mode: max
+    factor: 0.1
+    patience: 10
+    threshold: 1e-4
+
+  configure_optimizer_params:
+    monitor: val/ndcg_ser@100
+    interval: epoch
+    frequency: 1
+
+  loss:
+    softmax_temperature: 0.1
+
+
+
+  compile_model: true
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/serenlens_books_sasrec_seren_bce
+    filename: "epoch_{epoch:03d}"
+    save_last: true
+    save_top_k: 0
+
+logger:
+  tensorboard:
+    name: serenlens_books_experiment_sasrec_seren_bce
+    version: null
+  csv:
+    name: serenlens_books_experiment_sasrec_seren_bce
