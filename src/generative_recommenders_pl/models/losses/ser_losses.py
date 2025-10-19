@@ -116,6 +116,70 @@ class SerendipityBCELoss(_SerendipityLossBase):
         return loss, metrics
 
 
+class SerendipityFocalLoss(_SerendipityLossBase):
+    """Focal loss on logits for serendipity labels."""
+
+    def __init__(
+        self,
+        reduction: str = "mean",
+        gamma: float = 2.0,
+        alpha: float | None = 0.25,
+        pos_weight: float | None = None,
+    ) -> None:
+        super().__init__(reduction=reduction)
+        if gamma < 0.0:
+            msg = "gamma must be non-negative"
+            raise ValueError(msg)
+        if alpha is not None and not 0.0 <= alpha <= 1.0:
+            msg = "alpha must be in [0, 1]"
+            raise ValueError(msg)
+        if pos_weight is not None and pos_weight <= 0.0:
+            msg = "pos_weight must be positive"
+            raise ValueError(msg)
+        self.gamma = float(gamma)
+        default_alpha = float(alpha) if alpha is not None else None
+        if pos_weight is not None:
+            converted_alpha = float(pos_weight) / (float(pos_weight) + 1.0)
+            self.alpha = converted_alpha
+        else:
+            self.alpha = default_alpha
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        ser_labels: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if logits.size() != ser_labels.size():
+            msg = "logits and ser_labels must share shape"
+            raise ValueError(msg)
+        targets = ser_labels.to(dtype=logits.dtype, device=logits.device)
+        probabilities = torch.sigmoid(logits)
+        pt = probabilities * targets + (1.0 - probabilities) * (1.0 - targets)
+        focal_weight = torch.pow(1.0 - pt, self.gamma)
+        if self.alpha is not None:
+            alpha_factor = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
+        else:
+            alpha_factor = torch.ones_like(probabilities)
+        losses = (
+            F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+            * focal_weight
+            * alpha_factor
+        )
+        mask_tensor = self._prepare_mask(mask, logits)
+        loss, normalizer = self._reduce(losses, mask_tensor)
+        with torch.no_grad():
+            metrics = self._metrics(
+                loss=loss,
+                probabilities=probabilities,
+                targets=targets,
+                mask=mask_tensor,
+                normalizer=normalizer,
+            )
+            metrics["train/ser_focal"] = metrics.pop("train/ser_bce")
+        return loss, metrics
+
+
 class SerendipityProbabilityBCELoss(_SerendipityLossBase):
     """Binary cross entropy loss on probabilities for serendipity labels."""
 
