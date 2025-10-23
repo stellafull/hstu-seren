@@ -36,7 +36,6 @@ model:
     reduction: mean
     gamma: 2.0
     alpha: 0.25
-    pos_weight: 40
 
   transfer_learning:
     enabled: true

@@ -32,7 +32,6 @@ model:
     reduction: mean
     gamma: 2.0
     alpha: 0.25
-    pos_weight: 20
 
   load_strict: false
   item_embedding_dim: 256
