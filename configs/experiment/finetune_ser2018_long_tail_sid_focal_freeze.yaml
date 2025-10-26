@@ -1,9 +1,9 @@
 # @package _global_
 
-# Fine-tune on the SerenLens books long-tail split with semantic ID embeddings.
+# Fine-tune on the Serendipity 2018 long-tail split with semantic ID embeddings and focal serendipity loss.
 
 defaults:
-  - override /data: serenlens_books_long_tail
+  - override /data: serendipity_2018_answers
   - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -13,14 +13,14 @@ defaults:
 seed: 42
 
 data:
-  batch_size: 256
-  num_workers: 48
-  max_sequence_length: 50
+  batch_size: 128
+  num_workers: 8
+  max_sequence_length: 200
 
-tags: ["serenlens_books", "finetune", "long_tail", "sid"]
+tags: ["ser2018", "finetune", "long_tail", "sid"]
 
 trainer:
-  min_epochs: 99
+  min_epochs: 9
   max_epochs: 100
 
 model:
@@ -29,27 +29,27 @@ model:
     semantic_id:
       emb_comb_method: projgate
 
-  seren_loss_weight: 0.5
-  seren_score_alpha: 1
+  seren_loss_weight: 1.5
+  seren_score_alpha: 5
   seren_loss:
     _target_: generative_recommenders_pl.models.losses.ser_losses.SerendipityFocalLoss
     reduction: mean
-    gamma: 2.0
-    alpha: 0.25
+    gamma: 0.5
+    alpha: 0.85
 
   transfer_learning:
     enabled: true
-    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/amazon_books_long_tail_sid/last.ckpt
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018_long_tail_sid/last.ckpt
     strict: false
-    freeze_backbone: false
+    freeze_backbone: true
     freeze_modules: []
-    unfreeze_modules: []
+    unfreeze_modules: ['embeddings']
   load_strict: false
   item_embedding_dim: 256
 
   sequence_encoder:
-    num_blocks: 4
-    num_heads: 2
+    num_blocks: 8
+    num_heads: 4
 
   optimizer:
     _target_: torch.optim.AdamW
@@ -75,14 +75,14 @@ model:
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_serenlens_books_long_tail_sid
+    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_ser2018_long_tail_sid
     filename: "epoch_{epoch:03d}"
-    save_last: true
+    save_last: false
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: serenlens_books_long_tail_finetune_sid
-    version: null
+    name: ser2018_long_tail_finetune_sid
+    version: 2.0
   csv:
-    name: serenlens_books_long_tail_finetune_sid
+    name: ser2018_long_tail_finetune_sid

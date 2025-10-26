@@ -124,7 +124,6 @@ class SerendipityFocalLoss(_SerendipityLossBase):
         reduction: str = "mean",
         gamma: float = 2.0,
         alpha: float | None = 0.25,
-        pos_weight: float | None = None,
     ) -> None:
         super().__init__(reduction=reduction)
         if gamma < 0.0:
@@ -133,16 +132,8 @@ class SerendipityFocalLoss(_SerendipityLossBase):
         if alpha is not None and not 0.0 <= alpha <= 1.0:
             msg = "alpha must be in [0, 1]"
             raise ValueError(msg)
-        if pos_weight is not None and pos_weight <= 0.0:
-            msg = "pos_weight must be positive"
-            raise ValueError(msg)
         self.gamma = float(gamma)
-        default_alpha = float(alpha) if alpha is not None else None
-        if pos_weight is not None:
-            converted_alpha = float(pos_weight) / (float(pos_weight) + 1.0)
-            self.alpha = converted_alpha
-        else:
-            self.alpha = default_alpha
+        self.alpha = float(alpha) if alpha is not None else None
 
     def forward(
         self,

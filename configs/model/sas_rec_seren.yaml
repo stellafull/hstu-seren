@@ -100,7 +100,6 @@ seren_expert:
 seren_loss:
   _target_: generative_recommenders_pl.models.losses.ser_losses.SerendipityBCELoss
   reduction: mean
-  pos_weight: null
 
 seren_loss_weight: 0.2
 seren_score_alpha: 1.0
