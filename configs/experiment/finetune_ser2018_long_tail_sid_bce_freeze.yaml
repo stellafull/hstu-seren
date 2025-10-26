@@ -20,7 +20,7 @@ data:
 tags: ["ser2018", "finetune", "long_tail", "sid"]
 
 trainer:
-  min_epochs: 99
+  min_epochs: 10
   max_epochs: 100
 
 model:
@@ -29,8 +29,8 @@ model:
     semantic_id:
       emb_comb_method: projgate
 
-  seren_loss_weight: 0.5
-  seren_score_alpha: 2
+  seren_loss_weight: 0.2
+  seren_score_alpha: 0.5
   seren_loss:
     pos_weight: 8
 

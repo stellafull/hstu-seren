@@ -1,0 +1,78 @@
+# @package _global_
+
+# Fine-tune SASRec on the Serendipity 2018 answers split without semantic-id fusion.
+
+defaults:
+  - override /data: serendipity_2018_answers
+  - override /model: sas_rec_seren
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
+
+seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 8
+
+tags: ["ser2018", "sasrec", "experiment"]
+
+trainer:
+  min_epochs: 10
+  max_epochs: 100
+
+model:
+  embedding_type: local
+  seren_loss_weight: 0.0
+  seren_score_alpha: 0.0
+
+  transfer_learning:
+    enabled: true
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018_sasrec/last.ckpt
+    strict: false
+    freeze_backbone: true
+    freeze_modules: []
+    unfreeze_modules: ['embeddings']
+
+  load_strict: false
+  item_embedding_dim: 256
+
+  sequence_encoder:
+    num_blocks: 4
+    num_heads: 2
+    ffn_dropout_rate: 0.1
+
+  optimizer:
+    lr: 0.0001
+    weight_decay: 0.00001
+
+  scheduler:
+    patience: 5
+    factor: 0.1
+    threshold: 1e-4
+
+  configure_optimizer_params:
+    monitor: val/ndcg@100
+    interval: epoch
+    frequency: 1
+
+  loss:
+    num_to_sample: 256
+    softmax_temperature: 0.1
+
+  compile_model: true
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/ser2018_sasrec
+    filename: "epoch_{epoch:03d}"
+    save_last: false
+    save_top_k: 0
+
+logger:
+  tensorboard:
+    name: ser2018_sasrec_experiment
+    version: null
+  csv:
+    name: ser2018_sasrec_experiment

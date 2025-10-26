@@ -459,8 +459,8 @@ class HSTUSeren(Retrieval):
         if apply_seren:
             candidate_embeddings = self.embeddings.get_item_embeddings(top_k_ids)
             ser_logits = self._compute_seren_logits(user_repr, candidate_embeddings)
-            ser_probs = torch.relu(ser_logits)
-            combined_scores = base_scores + self.seren_score_alpha * ser_probs * ser_logits
+            ser_probs = torch.sigmoid(ser_logits)
+            combined_scores = base_scores + self.seren_score_alpha * ser_probs * torch.nn.functional.softplus(ser_logits)
             sort_indices = combined_scores.argsort(dim=1, descending=True)
             combined_scores = combined_scores.gather(1, sort_indices)
             top_k_ids = top_k_ids.gather(1, sort_indices)

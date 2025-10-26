@@ -1,10 +1,10 @@
 # @package _global_
 
-# SASRec with serendipity supervision on the Serendipity 2018 long-tail split.
+# Fine-tune on the Serendipity 2018 long-tail split without semantic ID embeddings (no SID).
 
 defaults:
-  - override /data: serendipity_2018_training_long_tail
-  - override /model: sas_rec_seren
+  - override /data: serendipity_2018_answers
+  - override /model: hstu_seren
   - override /callbacks: default
   - override /logger: many_loggers
   - override /trainer: default
@@ -17,43 +17,50 @@ data:
   num_workers: 8
   max_sequence_length: 200
 
-tags: ["ser2018", "long_tail", "sasrec", "seren"]
+tags: ["ser2018", "finetune", "long_tail"]
 
 trainer:
-  min_epochs: 99
-  max_epochs: 100
+  min_epochs: 9
+  max_epochs: 10
 
 model:
-  embedding_type: semantic_id
+  embedding_type: local
+
   seren_loss_weight: 0.5
-  seren_score_alpha: 1.0
+  seren_score_alpha: 1
   seren_loss:
     _target_: generative_recommenders_pl.models.losses.ser_losses.SerendipityFocalLoss
     reduction: mean
     gamma: 2.0
     alpha: 0.25
+
+  transfer_learning:
+    enabled: true
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/pretrain_ser2018_long_tail/last.ckpt
+    strict: false
+    freeze_backbone: false
+    freeze_modules: []
+    unfreeze_modules: []
   load_strict: false
   item_embedding_dim: 256
 
   sequence_encoder:
     num_blocks: 8
     num_heads: 4
-    ffn_hidden_dim: 1024
-    ffn_dropout_rate: 0.2
 
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 0.001
+    lr: 0.0001
     betas: [0.9, 0.98]
-    weight_decay: 0.001
+    weight_decay: 0.00001
 
   scheduler:
     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
     _partial_: true
     mode: max
     factor: 0.1
-    patience: 10
+    patience: 5
     threshold: 1e-4
 
   configure_optimizer_params:
@@ -61,21 +68,19 @@ model:
     interval: epoch
     frequency: 1
 
-  loss:
-    softmax_temperature: 0.1
-
   compile_model: true
 
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/ser2018_long_tail_sasrec_seren
+    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_ser2018_long_tail
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
 logger:
   tensorboard:
-    name: ser2018_long_tail_sasrec_seren
+    name: ser2018_long_tail_finetune
     version: null
   csv:
-    name: ser2018_long_tail_sasrec_seren
+    name: ser2018_long_tail_finetune
+

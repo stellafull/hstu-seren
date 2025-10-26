@@ -1,18 +1,5 @@
 _target_: generative_recommenders_pl.models.sas_rec_seren.SASRecSeren
 
-optimizer:
-  _target_: torch.optim.SGD
-  _partial_: true
-
-scheduler:
-  _target_: torch.optim.lr_scheduler.ConstantLR
-  _partial_: true
-
-configure_optimizer_params:
-  monitor: val/hr@100
-  interval: epoch
-  frequency: 1
-
 gr_output_length: 10
 item_embedding_dim: 50
 embedding_type: local
@@ -117,3 +104,23 @@ load_strict: false
 
 # compile model for faster training with pytorch 2.0
 compile_model: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.001
+  betas: [0.9, 0.98]
+  weight_decay: 0.001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: max
+  factor: 0.1
+  patience: 10
+  threshold: 1e-4
+
+configure_optimizer_params:
+  monitor: val/ndcg@100
+  interval: epoch
+  frequency: 1
