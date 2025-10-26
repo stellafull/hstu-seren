@@ -1,9 +1,9 @@
 # @package _global_
 
-# Fine-tune on Serendipity 2018 answers with SASRec + Seren expert supervision.
+# Fine-tune SASRec on the SerenLens movies split without serendipity supervision.
 
 defaults:
-  - override /data: serendipity_2018_answers_experiment
+  - override /data: serenlens_movies
   - override /model: sas_rec_seren
   - override /callbacks: default
   - override /logger: many_loggers
@@ -14,69 +14,71 @@ seed: 42
 
 data:
   batch_size: 256
-  num_workers: 8
-  max_sequence_length: 10
+  num_workers: 48
+  max_sequence_length: 50
 
-tags: ["ser2018_sas_rec_seren", "experiment", "sid"]
+tags: ["serenlens_movies", "finetune", "sasrec"]
 
 trainer:
-  min_epochs: 99
+  min_epochs: 10
   max_epochs: 100
 
 model:
-  embedding_type: semantic_id  # semantic ID embedding variant
-  seren_loss_weight: 2
-  seren_score_alpha: 10
-  seren_loss:
-    pos_weight: 8
+  embedding_type: local
+  seren_loss_weight: 0.0
+  seren_score_alpha: 0.0
+
   transfer_learning:
-    enabled: false
-    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/ser2018_sas_rec_seren/last.ckpt
+    enabled: true
+    checkpoint_path: ${paths.root_dir}/tmp/checkpoints/amazon_movies_long_tail_sasrec/last.ckpt
     strict: false
     freeze_backbone: false
     freeze_modules: []
     unfreeze_modules: []
+
   load_strict: false
   item_embedding_dim: 256
 
   sequence_encoder:
-    num_blocks: 8
-    num_heads: 4
-    ffn_hidden_dim: 1024
-    ffn_dropout_rate: 0.2
+    num_blocks: 4
+    num_heads: 2
+    ffn_dropout_rate: 0.1
 
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 0.001
+    lr: 0.0001
     betas: [0.9, 0.98]
-    weight_decay: 0.001
+    weight_decay: 0.00001
 
   scheduler:
     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
     _partial_: true
     mode: max
     factor: 0.1
-    patience: 10
+    patience: 5
     threshold: 1e-4
 
   configure_optimizer_params:
-    monitor: val/ndcg@10
+    monitor: val/ndcg@100
     interval: epoch
     frequency: 1
 
+  loss:
+    softmax_temperature: 0.1
+
+  compile_model: true
+
 callbacks:
   model_checkpoint:
-    dirpath: ${paths.root_dir}/tmp/checkpoints/ser2018_sas_rec_seren
+    dirpath: ${paths.root_dir}/tmp/checkpoints/finetune_serenlens_movies_sasrec
     filename: "epoch_{epoch:03d}"
     save_last: true
     save_top_k: 0
 
-compile_model: true
-
 logger:
   tensorboard:
-    name: ser2018_sas_rec_seren_experiment
+    name: serenlens_movies_finetune_sasrec
     version: null
   csv:
-    name: ser2018_sas_rec_seren_experiment
+    name: serenlens_movies_finetune_sasrec

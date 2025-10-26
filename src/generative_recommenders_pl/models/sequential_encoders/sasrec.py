@@ -8,7 +8,7 @@ better than SASRec? (https://arxiv.org/abs/2309.07602, RecSys'23), where the aut
 sampled softmax loss to significantly improved SASRec model quality.
 """
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -75,9 +75,14 @@ class SASRec(torch.nn.Module):
         ffn_hidden_dim: int,
         ffn_activation_fn: str,
         ffn_dropout_rate: float,
+        attention_dim: int | None = None,
+        linear_dim: int | None = None,
         activation_checkpoint: bool = False,
+        **_: Any,
     ) -> None:
         super().__init__()
+
+        del attention_dim, linear_dim
 
         self._embedding_dim: int = embedding_dim
         self._item_embedding_dim: int = item_embedding_dim
