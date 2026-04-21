@@ -8,6 +8,8 @@ data_preprocessor:
   _target_: generative_recommenders_pl.data.preprocessor.MovielensDataProcessor
   ratings_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/training.csv
   movies_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/movies.csv
+  leakage_reference_path: ${paths.root_dir}/tmp/serendipity-2018/serendipity-sac2018/answers.csv
+  remove_post_reference_interactions: true
   prefix: serendipity-2018
   output_root: ${paths.root_dir}/tmp/pre_train
   min_sequence_length: 5
