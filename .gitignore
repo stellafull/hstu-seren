@@ -165,3 +165,4 @@ logs/
 tmp/
 uv.lock
 ckpts
+.omx/
