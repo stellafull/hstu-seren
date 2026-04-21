@@ -45,6 +45,14 @@ def main(cfg: DictConfig) -> int:
 
     Path(preprocessor.output_format_csv()).parent.mkdir(parents=True, exist_ok=True)
     num_unique_items = preprocessor.preprocess_rating()
+    log.info(
+        "Prepared %s items | ratings=%s | sequences=%s | users=%s | items=%s",
+        num_unique_items,
+        preprocessor.normalized_ratings_csv(),
+        preprocessor.output_format_csv(),
+        preprocessor.user_lookup_csv(),
+        preprocessor.item_lookup_csv(),
+    )
     return num_unique_items
 
 

@@ -8,6 +8,7 @@ data_preprocessor:
   _target_: generative_recommenders_pl.data.preprocessor.AmazonDataProcessor
   ratings_path: ${paths.root_dir}/tmp/amzn_books_2015/ratings_Books.csv
   serenlens_path: ${paths.root_dir}/tmp/amzn_books_2015/SerenLens_Books.csv
+  remove_post_reference_interactions: true
   prefix: amazon_books_long_tail
   output_root: ${paths.root_dir}/tmp/pre_train
   min_presence: 1

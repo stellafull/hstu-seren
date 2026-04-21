@@ -44,6 +44,172 @@ def _read_movie_ids(movies_path: Path) -> list[str]:
     return movie_ids
 
 
+def _resolve_reference_column(
+    columns: Iterable[str],
+    *,
+    explicit: str | None,
+    candidates: Iterable[str],
+    label: str,
+    reference_path: Path,
+) -> str:
+    available = list(columns)
+    if explicit is not None:
+        if explicit not in available:
+            raise ValueError(
+                f"Reference file {reference_path} is missing explicit {label} column "
+                f"{explicit!r}; available columns: {available}"
+            )
+        return explicit
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+    raise ValueError(
+        f"Reference file {reference_path} is missing a {label} column. "
+        f"Tried {list(candidates)}; available columns: {available}"
+    )
+
+
+def _load_reference_interactions(
+    reference_path: Path,
+    *,
+    user_column: str | None = None,
+    item_column: str | None = None,
+    timestamp_column: str | None = None,
+) -> pd.DataFrame:
+    if not reference_path.exists():
+        raise FileNotFoundError(f"Reference interactions file not found: {reference_path}")
+
+    header = pd.read_csv(reference_path, nrows=0, encoding="utf-8-sig")
+    user_col = _resolve_reference_column(
+        header.columns,
+        explicit=user_column,
+        candidates=("user_id", "userId"),
+        label="user",
+        reference_path=reference_path,
+    )
+    item_col = _resolve_reference_column(
+        header.columns,
+        explicit=item_column,
+        candidates=("item_id", "movieId", "itemId"),
+        label="item",
+        reference_path=reference_path,
+    )
+    timestamp_col = _resolve_reference_column(
+        header.columns,
+        explicit=timestamp_column,
+        candidates=("timestamp", "unix_timestamp"),
+        label="timestamp",
+        reference_path=reference_path,
+    )
+
+    reference = pd.read_csv(
+        reference_path,
+        usecols=[user_col, item_col, timestamp_col],
+        encoding="utf-8-sig",
+    )
+    reference.rename(
+        columns={
+            user_col: "user_id",
+            item_col: "item_id",
+            timestamp_col: "timestamp",
+        },
+        inplace=True,
+    )
+    reference["user_id"] = reference["user_id"].astype("object")
+    reference["item_id"] = reference["item_id"].astype("object")
+    reference["timestamp"] = pd.to_numeric(reference["timestamp"], errors="coerce")
+
+    invalid_mask = (
+        reference["timestamp"].isna()
+        | reference["user_id"].isna()
+        | reference["item_id"].isna()
+    )
+    if invalid_mask.any():
+        dropped = int(invalid_mask.sum())
+        log.warning(
+            "Dropping %s invalid reference rows from %s before leakage filtering",
+            dropped,
+            reference_path,
+        )
+        reference = reference.loc[~invalid_mask].reset_index(drop=True)
+
+    reference["user_id"] = reference["user_id"].map(lambda value: str(value).strip())
+    reference["item_id"] = reference["item_id"].map(lambda value: str(value).strip())
+    empty_mask = (reference["user_id"] == "") | (reference["item_id"] == "")
+    if empty_mask.any():
+        dropped = int(empty_mask.sum())
+        log.warning(
+            "Dropping %s empty-id reference rows from %s before leakage filtering",
+            dropped,
+            reference_path,
+        )
+        reference = reference.loc[~empty_mask].reset_index(drop=True)
+
+    if reference.empty:
+        raise ValueError(f"No valid reference rows could be loaded from {reference_path}")
+
+    reference["timestamp"] = reference["timestamp"].astype("int64")
+    reference["_normalized_user_id"] = reference["user_id"].str.casefold()
+    reference["_normalized_item_id"] = reference["item_id"].str.casefold()
+    return reference
+
+
+def _apply_reference_leakage_filter(
+    ratings: pd.DataFrame,
+    reference: pd.DataFrame,
+    *,
+    prefix: str,
+    reference_name: str,
+    remove_post_reference_interactions: bool = True,
+) -> pd.DataFrame:
+    if ratings.empty or reference.empty:
+        return ratings
+
+    source_user = ratings["user_id"].astype(str).str.casefold()
+    source_item = ratings["item_id"].astype(str).str.casefold()
+    source_pairs = pd.MultiIndex.from_arrays([source_user, source_item])
+    reference_pairs = pd.MultiIndex.from_frame(
+        reference[["_normalized_user_id", "_normalized_item_id"]].drop_duplicates()
+    )
+    pair_overlap_mask = source_pairs.isin(reference_pairs)
+
+    reference_cutoffs = reference.groupby("_normalized_user_id", sort=False)[
+        "timestamp"
+    ].min()
+    source_cutoffs = source_user.map(reference_cutoffs)
+    ambiguous_timestamp_mask = source_cutoffs.notna() & (
+        ratings["timestamp"] == source_cutoffs
+    )
+    post_reference_mask = source_cutoffs.notna() & (ratings["timestamp"] > source_cutoffs)
+    cutoff_mask = (
+        ambiguous_timestamp_mask | post_reference_mask
+        if remove_post_reference_interactions
+        else pd.Series(False, index=ratings.index)
+    )
+    removal_mask = pair_overlap_mask | cutoff_mask
+
+    removed_pairs = int(pair_overlap_mask.sum())
+    removed_post_reference = int((post_reference_mask & ~pair_overlap_mask).sum())
+    ambiguous_rows = int((ambiguous_timestamp_mask & ~pair_overlap_mask).sum())
+    removed_total = int(removal_mask.sum())
+
+    if removed_total:
+        log.info(
+            (
+                "%s applied %s leakage guard: removed=%s "
+                "(pair_overlap=%s, post_reference=%s, ambiguous_boundary=%s)"
+            ),
+            prefix,
+            reference_name,
+            removed_total,
+            removed_pairs,
+            removed_post_reference,
+            ambiguous_rows,
+        )
+
+    return ratings.loc[~removal_mask].reset_index(drop=True)
+
+
 def _ensure_lookup_series(
     values: pd.Series,
     lookup_path: Path,
@@ -168,6 +334,8 @@ def _build_sequence_frame(
             seq_df[target] = seq_df[target].apply(_format_sequence)
 
     return seq_df, lengths
+
+
 class DataProcessor(abc.ABC):
     """Base preprocessor that materializes SASRec-style sequential data."""
 
@@ -263,6 +431,11 @@ class MovielensDataProcessor(DataProcessor):
         min_presence: int = 1,
         expected_num_unique_items: Optional[int] = None,
         expected_max_item_id: Optional[int] = None,
+        leakage_reference_path: str | Path | None = None,
+        leakage_reference_user_column: str | None = None,
+        leakage_reference_item_column: str | None = None,
+        leakage_reference_timestamp_column: str | None = None,
+        remove_post_reference_interactions: bool = True,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
         output_dirname: str | None = None,
@@ -283,6 +456,15 @@ class MovielensDataProcessor(DataProcessor):
         self._min_sequence_length = max(1, min_sequence_length)
         self._min_presence = max(1, min_presence)
         self._extra_sequence_columns = extra_sequence_columns or {}
+        self._leakage_reference_path = (
+            Path(leakage_reference_path) if leakage_reference_path else None
+        )
+        self._leakage_reference_user_column = leakage_reference_user_column
+        self._leakage_reference_item_column = leakage_reference_item_column
+        self._leakage_reference_timestamp_column = leakage_reference_timestamp_column
+        self._remove_post_reference_interactions = bool(
+            remove_post_reference_interactions
+        )
 
     def _transform_ratings(self, ratings: pd.DataFrame) -> pd.DataFrame:
         return ratings
@@ -315,6 +497,36 @@ class MovielensDataProcessor(DataProcessor):
         ratings = self._transform_ratings(ratings)
         ratings = ratings[required + list(self._extra_sequence_columns.keys())]
 
+        ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
+        ratings["timestamp"] = pd.to_numeric(ratings["timestamp"], errors="coerce")
+        if ratings["rating"].isnull().any():
+            raise ValueError("Ratings column contains non-numeric values.")
+        if ratings["timestamp"].isnull().any():
+            raise ValueError("Timestamp column contains non-numeric values.")
+
+        ratings["rating"] = ratings["rating"].astype(float)
+        ratings["timestamp"] = ratings["timestamp"].astype("int64")
+
+        if self._leakage_reference_path is not None:
+            reference = _load_reference_interactions(
+                self._leakage_reference_path,
+                user_column=self._leakage_reference_user_column,
+                item_column=self._leakage_reference_item_column,
+                timestamp_column=self._leakage_reference_timestamp_column,
+            )
+            ratings = _apply_reference_leakage_filter(
+                ratings,
+                reference,
+                prefix=self._prefix,
+                reference_name=self._leakage_reference_path.name,
+                remove_post_reference_interactions=self._remove_post_reference_interactions,
+            )
+            if ratings.empty:
+                raise ValueError(
+                    f"No ratings remaining after applying leakage reference filter from "
+                    f"{self._leakage_reference_path}"
+                )
+
         if self._min_presence > 1:
             initial_rows = ratings.shape[0]
             item_counts = ratings["item_id"].value_counts()
@@ -336,16 +548,6 @@ class MovielensDataProcessor(DataProcessor):
                     initial_rows,
                     filtered_rows,
                 )
-
-        ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
-        ratings["timestamp"] = pd.to_numeric(ratings["timestamp"], errors="coerce")
-        if ratings["rating"].isnull().any():
-            raise ValueError("Ratings column contains non-numeric values.")
-        if ratings["timestamp"].isnull().any():
-            raise ValueError("Timestamp column contains non-numeric values.")
-
-        ratings["rating"] = ratings["rating"].astype(float)
-        ratings["timestamp"] = ratings["timestamp"].astype("int64")
 
         initial_user_entries = self._user_lookup_initial_entries()
         user_ids, user_lookup = _ensure_lookup_series(
@@ -525,6 +727,7 @@ class AmazonDataProcessor(DataProcessor):
         *,
         min_presence: int = 5,
         min_sequence_length: int = 5,
+        remove_post_reference_interactions: bool = True,
         expected_num_unique_items: Optional[int] = None,
         output_root: str | Path | None = None,
         lookup_root: str | Path | None = None,
@@ -546,6 +749,9 @@ class AmazonDataProcessor(DataProcessor):
         self._min_presence = max(1, min_presence)
         self._min_sequence_length = max(1, min_sequence_length)
         self._extra_sequence_columns = extra_sequence_columns or {}
+        self._remove_post_reference_interactions = bool(
+            remove_post_reference_interactions
+        )
 
     def preprocess_rating(self) -> int:
         if not self._ratings_path.exists():
@@ -561,47 +767,21 @@ class AmazonDataProcessor(DataProcessor):
             dtype={"user_id": str, "item_id": str, "rating": float, "timestamp": float},
             engine="python",
         )
-        serenlens = pd.read_csv(
-            self._serenlens_path,
-            usecols=["user_id", "item_id"],
-            dtype={"user_id": str, "item_id": str},
-            engine="python",
+        ratings.dropna(subset=["rating", "timestamp"], inplace=True)
+        ratings["rating"] = ratings["rating"].astype(float)
+        ratings["timestamp"] = ratings["timestamp"].astype("int64")
+        ratings = _apply_reference_leakage_filter(
+            ratings,
+            _load_reference_interactions(self._serenlens_path),
+            prefix=self._prefix,
+            reference_name=self._serenlens_path.name,
+            remove_post_reference_interactions=self._remove_post_reference_interactions,
         )
-
-        initial_rows = ratings.shape[0]
-
-        ratings["_normalized_user_id"] = ratings["user_id"].str.casefold()
-        ratings["_normalized_item_id"] = ratings["item_id"].str.casefold()
-
-        serenlens_pairs = serenlens.copy()
-        serenlens_pairs["_normalized_user_id"] = (
-            serenlens_pairs["user_id"].str.casefold()
-        )
-        serenlens_pairs["_normalized_item_id"] = (
-            serenlens_pairs["item_id"].str.casefold()
-        )
-        serenlens_pairs = serenlens_pairs.drop_duplicates(
-            subset=["_normalized_user_id", "_normalized_item_id"]
-        )
-        serenlens_pairs["_serenlens"] = True
-        ratings = ratings.merge(
-            serenlens_pairs[
-                ["_normalized_user_id", "_normalized_item_id", "_serenlens"]
-            ],
-            how="left",
-            on=["_normalized_user_id", "_normalized_item_id"],
-        )
-        leak_rows = ratings["_serenlens"].fillna(False).sum()
-        if leak_rows:
-            log.info(
-                "%s removing %s SerenLens overlaps (%s -> %s records)",
-                self._prefix,
-                int(leak_rows),
-                initial_rows,
-                initial_rows - int(leak_rows),
+        if ratings.empty:
+            raise ValueError(
+                f"No ratings remaining after applying leakage reference filter from "
+                f"{self._serenlens_path}"
             )
-        ratings = ratings[ratings["_serenlens"].isna()].drop(columns="_serenlens")
-        ratings.drop(columns=["_normalized_user_id", "_normalized_item_id"], inplace=True)
 
         item_counts = ratings["item_id"].value_counts()
         user_counts = ratings["user_id"].value_counts()
@@ -609,10 +789,10 @@ class AmazonDataProcessor(DataProcessor):
             (ratings["item_id"].map(item_counts) >= self._min_presence)
             & (ratings["user_id"].map(user_counts) >= self._min_presence)
         ]
-
-        ratings.dropna(subset=["rating", "timestamp"], inplace=True)
-        ratings["rating"] = ratings["rating"].astype(float)
-        ratings["timestamp"] = ratings["timestamp"].astype("int64")
+        if ratings.empty:
+            raise ValueError(
+                f"No ratings remaining after applying min_presence={self._min_presence}"
+            )
 
         ratings = ratings[["user_id", "item_id", "rating", "timestamp"]]
 
