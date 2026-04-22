@@ -17,7 +17,7 @@ embedding:
   datasets: []
   model:
     name: Qwen/Qwen3-Embedding-8B
-    batch_size: 128
+    batch_size: 32
     device: null
     normalize: true
     trust_remote_code: true
@@ -29,6 +29,7 @@ embedding:
     compute_dtype: float16
   output:
     path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/embeddings.parquet
+    max_items_per_file: 10000
     format: parquet
     resume: true
     overwrite: false

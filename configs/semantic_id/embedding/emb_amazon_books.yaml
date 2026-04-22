@@ -17,7 +17,7 @@ embedding:
   datasets: []
   model:
     name: Qwen/Qwen3-Embedding-8B
-    batch_size: 32
+    batch_size: 16
     device: null
     normalize: true
     trust_remote_code: true
@@ -29,7 +29,7 @@ embedding:
     compute_dtype: float16
   output:
     path: ${paths.root_dir}/tmp/semantic_id/amazon_books/embeddings.parquet
-    max_items_per_file: 500000
+    max_items_per_file: 10000
     format: parquet
     resume: true
     overwrite: false
