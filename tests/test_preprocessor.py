@@ -80,7 +80,7 @@ def test_movielens_source_preprocessing_filters_target_overlap_and_future_rows(
     }
 
     seq_df = pd.read_csv(processor.output_format_csv())
-    assert set(seq_df["sequence_timestamps"]) == {"100", "50", "70"}
+    assert {str(value) for value in seq_df["sequence_timestamps"]} == {"100", "50", "70"}
 
 
 def test_amazon_source_preprocessing_filters_target_overlap_and_boundary_rows(
@@ -149,4 +149,3 @@ def test_amazon_source_preprocessing_filters_target_overlap_and_boundary_rows(
         ("usera", "item1", 10),
         ("userb", "item4", 5),
     }
-

@@ -1,0 +1,17 @@
+name: movielens
+label: MovieLens
+source_data_name: serendipity_2018_training
+target_data_name: serendipity_2018_answers
+source_prepared_dir: tmp/pre_train/serendipity-2018
+target_prepared_dir: tmp/tuning/serendipity-2018
+source_raw_path: tmp/serendipity-2018/serendipity-sac2018/training.csv
+target_raw_path: tmp/serendipity-2018/serendipity-sac2018/answers.csv
+metadata_path: tmp/serendipity-2018/serendipity-sac2018/movies.csv
+metadata_kind: movielens
+semantic_id_candidates:
+  - tmp/semantic_id/serendipity_2018/inference_semantic_ids.pt
+  - tmp/semantic_id/serendipity_2018/semantic_ids.pt
+source_raw_kind: movielens
+target_raw_kind: serendipity_answers
+positive_rating_threshold: 4.0
+primary_domain: true

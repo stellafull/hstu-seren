@@ -166,3 +166,4 @@ tmp/
 uv.lock
 ckpts
 .omx/
+outputs/local_gate/

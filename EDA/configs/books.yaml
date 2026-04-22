@@ -1,0 +1,17 @@
+name: books
+label: Books
+source_data_name: amazon_books
+target_data_name: serenlens_books
+source_prepared_dir: tmp/pre_train/amazon_books
+target_prepared_dir: tmp/tuning/amazon_books
+source_raw_path: tmp/amzn_books_2015/ratings_Books.csv
+target_raw_path: tmp/amzn_books_2015/SerenLens_Books.csv
+metadata_path: tmp/amzn_books_2015/meta_Books.json
+metadata_kind: amazon
+semantic_id_candidates:
+  - tmp/semantic_id/amazon_books/inference_semantic_ids.pt
+  - tmp/semantic_id/amazon_books/semantic_ids.pt
+source_raw_kind: amazon
+target_raw_kind: serenlens
+positive_rating_threshold: 4.0
+primary_domain: true

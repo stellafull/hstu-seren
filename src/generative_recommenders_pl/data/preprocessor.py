@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -67,6 +68,16 @@ def _resolve_reference_column(
         f"Reference file {reference_path} is missing a {label} column. "
         f"Tried {list(candidates)}; available columns: {available}"
     )
+
+
+@dataclass(frozen=True)
+class LeakageAuditSummary:
+    source_before: int
+    target_pairs: int
+    removed_target_pairs: int
+    removed_post_target_interactions: int
+    ambiguous: int
+    source_after: int
 
 
 def _load_reference_interactions(
@@ -154,38 +165,82 @@ def _load_reference_interactions(
     return reference
 
 
-def _apply_reference_leakage_filter(
+def load_reference_interactions(
+    reference_path: str | Path,
+    *,
+    user_column: str | None = None,
+    item_column: str | None = None,
+    timestamp_column: str | None = None,
+) -> pd.DataFrame:
+    return _load_reference_interactions(
+        Path(reference_path),
+        user_column=user_column,
+        item_column=item_column,
+        timestamp_column=timestamp_column,
+    )
+
+
+def apply_source_target_leakage_filter(
     ratings: pd.DataFrame,
     reference: pd.DataFrame,
     *,
-    prefix: str,
-    reference_name: str,
+    prefix: str = "eda",
+    reference_name: str = "reference",
     remove_post_reference_interactions: bool = True,
-) -> pd.DataFrame:
+    return_details: bool = False,
+) -> tuple[pd.DataFrame, LeakageAuditSummary, dict[str, pd.DataFrame]] | tuple[
+    pd.DataFrame, LeakageAuditSummary
+]:
     if ratings.empty or reference.empty:
-        return ratings
+        summary = LeakageAuditSummary(
+            source_before=int(ratings.shape[0]),
+            target_pairs=int(
+                reference[["_normalized_user_id", "_normalized_item_id"]]
+                .drop_duplicates()
+                .shape[0]
+            )
+            if not reference.empty
+            else 0,
+            removed_target_pairs=0,
+            removed_post_target_interactions=0,
+            ambiguous=0,
+            source_after=int(ratings.shape[0]),
+        )
+        if return_details:
+            empty = pd.DataFrame()
+            return ratings.copy(), summary, {
+                "removed_target_pairs": empty,
+                "removed_post_target_interactions": empty,
+                "ambiguous_cases": empty,
+            }
+        return ratings.copy(), summary
 
-    source_user = ratings["user_id"].astype(str).str.casefold()
-    source_item = ratings["item_id"].astype(str).str.casefold()
+    working = ratings.copy()
+    source_user = working["user_id"].astype(str).str.casefold()
+    source_item = working["item_id"].astype(str).str.casefold()
     source_pairs = pd.MultiIndex.from_arrays([source_user, source_item])
     reference_pairs = pd.MultiIndex.from_frame(
         reference[["_normalized_user_id", "_normalized_item_id"]].drop_duplicates()
     )
-    pair_overlap_mask = source_pairs.isin(reference_pairs)
+    pair_overlap_mask = pd.Series(
+        source_pairs.isin(reference_pairs),
+        index=working.index,
+        dtype=bool,
+    )
 
+    source_timestamps = pd.to_numeric(working["timestamp"], errors="coerce")
     reference_cutoffs = reference.groupby("_normalized_user_id", sort=False)[
         "timestamp"
     ].min()
     source_cutoffs = source_user.map(reference_cutoffs)
     ambiguous_timestamp_mask = source_cutoffs.notna() & (
-        ratings["timestamp"] == source_cutoffs
+        source_timestamps == source_cutoffs
     )
-    post_reference_mask = source_cutoffs.notna() & (ratings["timestamp"] > source_cutoffs)
-    cutoff_mask = (
-        ambiguous_timestamp_mask | post_reference_mask
-        if remove_post_reference_interactions
-        else pd.Series(False, index=ratings.index)
-    )
+    post_reference_mask = source_cutoffs.notna() & (source_timestamps > source_cutoffs)
+    if remove_post_reference_interactions:
+        cutoff_mask = ambiguous_timestamp_mask | post_reference_mask
+    else:
+        cutoff_mask = pd.Series(False, index=working.index, dtype=bool)
     removal_mask = pair_overlap_mask | cutoff_mask
 
     removed_pairs = int(pair_overlap_mask.sum())
@@ -207,7 +262,46 @@ def _apply_reference_leakage_filter(
             ambiguous_rows,
         )
 
-    return ratings.loc[~removal_mask].reset_index(drop=True)
+    cleaned = working.loc[~removal_mask].reset_index(drop=True)
+    summary = LeakageAuditSummary(
+        source_before=int(working.shape[0]),
+        target_pairs=int(reference_pairs.shape[0]),
+        removed_target_pairs=removed_pairs,
+        removed_post_target_interactions=removed_post_reference,
+        ambiguous=ambiguous_rows,
+        source_after=int(cleaned.shape[0]),
+    )
+    if not return_details:
+        return cleaned, summary
+
+    details = {
+        "removed_target_pairs": working.loc[pair_overlap_mask].reset_index(drop=True),
+        "removed_post_target_interactions": working.loc[
+            post_reference_mask & ~pair_overlap_mask
+        ].reset_index(drop=True),
+        "ambiguous_cases": working.loc[
+            ambiguous_timestamp_mask & ~pair_overlap_mask
+        ].reset_index(drop=True),
+    }
+    return cleaned, summary, details
+
+
+def _apply_reference_leakage_filter(
+    ratings: pd.DataFrame,
+    reference: pd.DataFrame,
+    *,
+    prefix: str,
+    reference_name: str,
+    remove_post_reference_interactions: bool = True,
+) -> pd.DataFrame:
+    cleaned, _summary = apply_source_target_leakage_filter(
+        ratings,
+        reference,
+        prefix=prefix,
+        reference_name=reference_name,
+        remove_post_reference_interactions=remove_post_reference_interactions,
+    )
+    return cleaned
 
 
 def _ensure_lookup_series(
@@ -975,8 +1069,11 @@ class SerenLensDataProcessor(DataProcessor):
 
 __all__ = [
     "DataProcessor",
+    "LeakageAuditSummary",
     "MovielensDataProcessor",
     "SerendipityAnswersDataProcessor",
     "AmazonDataProcessor",
     "SerenLensDataProcessor",
+    "apply_source_target_leakage_filter",
+    "load_reference_interactions",
 ]

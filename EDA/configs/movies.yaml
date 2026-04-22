@@ -1,0 +1,17 @@
+name: movies
+label: Movies & TV
+source_data_name: amazon_movies
+target_data_name: serenlens_movies
+source_prepared_dir: tmp/pre_train/amazon_movies
+target_prepared_dir: tmp/tuning/amazon_movies
+source_raw_path: tmp/amzn_mv_2015/ratings_Movies_and_TV.csv
+target_raw_path: tmp/amzn_mv_2015/SerenLens_Movies.csv
+metadata_path: tmp/amzn_mv_2015/meta_Movies_and_TV.json
+metadata_kind: amazon
+semantic_id_candidates:
+  - tmp/semantic_id/amazon_movies/inference_semantic_ids.pt
+  - tmp/semantic_id/amazon_movies/semantic_ids.pt
+source_raw_kind: amazon
+target_raw_kind: serenlens
+positive_rating_threshold: 4.0
+primary_domain: false
