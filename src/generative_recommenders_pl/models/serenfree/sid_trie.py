@@ -18,30 +18,35 @@ class SIDBeam:
     """One constrained decoding result."""
 
     item_id: int
-    sid: tuple[int, int, int, int]
+    sid: tuple[int, ...]
     score: float
 
 
 class SIDTrie:
-    """Trie over valid `(q1, q2, q3, d)` tuples."""
+    """Trie over valid full SID tuples."""
 
     def __init__(self) -> None:
         self._root: dict[int, dict] = {}
+        self.num_sid_columns: int | None = None
 
     @classmethod
     def from_items(cls, item_ids: torch.Tensor, sid_tokens: torch.Tensor) -> "SIDTrie":
         if item_ids.dim() != 1:
             raise ValueError("item_ids must be 1D")
-        if sid_tokens.shape != (item_ids.numel(), 4):
-            raise ValueError("sid_tokens must have shape [num_items, 4]")
+        if sid_tokens.dim() != 2 or sid_tokens.size(0) != item_ids.numel():
+            raise ValueError("sid_tokens must have shape [num_items, sid_columns]")
         trie = cls()
         for item_id, sid in zip(item_ids.tolist(), sid_tokens.to(torch.long).tolist()):
             trie.insert(int(item_id), tuple(int(token) for token in sid))
         return trie
 
-    def insert(self, item_id: int, sid: tuple[int, int, int, int]) -> None:
-        if len(sid) != 4:
-            raise ValueError("sid must contain exactly four tokens")
+    def insert(self, item_id: int, sid: tuple[int, ...]) -> None:
+        if len(sid) < 2:
+            raise ValueError("sid must include semantic levels and dedup")
+        if self.num_sid_columns is None:
+            self.num_sid_columns = len(sid)
+        elif len(sid) != self.num_sid_columns:
+            raise ValueError("all SIDs in one trie must have the same depth")
         node = self._root
         for token in sid:
             node = node.setdefault(int(token), {})
@@ -51,7 +56,7 @@ class SIDTrie:
         node = self._node(prefix)
         return sorted(token for token in node.keys() if isinstance(token, int))
 
-    def item_id(self, sid: tuple[int, int, int, int]) -> int | None:
+    def item_id(self, sid: tuple[int, ...]) -> int | None:
         node = self._node(sid)
         value = node.get("_item_id")
         return int(value) if value is not None else None
@@ -73,24 +78,28 @@ def constrained_beam_search(
     beam_size: int,
     mode: DecoderMode | int = DecoderMode.RELEVANCE,
 ) -> list[list[SIDBeam]]:
-    """Decode valid SIDs for each batch row using trie-constrained beams."""
+    """Decode valid full SIDs for each batch row using trie constraints."""
 
     if context.dim() != 2:
         raise ValueError("context must have shape [B, H]")
     if beam_size <= 0:
         raise ValueError("beam_size must be positive")
+    if trie.num_sid_columns is None:
+        raise ValueError("trie is empty")
 
     results: list[list[SIDBeam]] = []
     for row_idx in range(context.size(0)):
         row_context = context[row_idx : row_idx + 1]
         beams: list[tuple[tuple[int, ...], float]] = [((), 0.0)]
-        for level in range(4):
+        for level in range(trie.num_sid_columns):
             expanded: list[tuple[tuple[int, ...], float]] = []
             for prefix, score in beams:
                 allowed = trie.allowed_tokens(prefix)
                 if not allowed:
                     continue
-                prefix_tensor = _prefix_tensor(prefix, row_context.device)
+                prefix_tensor = _prefix_tensor(
+                    prefix, decoder.num_semantic_levels, row_context.device
+                )
                 logits = decoder(row_context, prefix_tensor, mode=mode).as_list()[level][0]
                 log_probs = F.log_softmax(logits, dim=-1)
                 for token in allowed:
@@ -99,17 +108,16 @@ def constrained_beam_search(
 
         row_results: list[SIDBeam] = []
         for sid_prefix, score in beams:
-            if len(sid_prefix) != 4:
-                continue
-            sid = sid_prefix  # type: ignore[assignment]
-            item_id = trie.item_id(sid)
+            item_id = trie.item_id(sid_prefix)
             if item_id is not None:
-                row_results.append(SIDBeam(item_id=item_id, sid=sid, score=score))
+                row_results.append(SIDBeam(item_id=item_id, sid=sid_prefix, score=score))
         results.append(row_results)
     return results
 
 
-def _prefix_tensor(prefix: tuple[int, ...], device: torch.device) -> torch.Tensor:
-    padded = list(prefix[:3])
-    padded.extend([0] * (3 - len(padded)))
+def _prefix_tensor(
+    prefix: tuple[int, ...], num_semantic_levels: int, device: torch.device
+) -> torch.Tensor:
+    padded = list(prefix[:num_semantic_levels])
+    padded.extend([0] * (num_semantic_levels - len(padded)))
     return torch.tensor([padded], dtype=torch.long, device=device)

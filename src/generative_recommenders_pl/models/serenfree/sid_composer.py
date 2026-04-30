@@ -6,47 +6,53 @@ import torch
 
 
 class SIDComposer(torch.nn.Module):
-    """Compose `(q1, q2, q3, d)` into one item-level embedding.
+    """Compose variable-depth full SIDs into one item-level embedding.
 
-    The first three semantic levels are concatenated and projected. The dedup
-    token conditions the semantic embedding with a gated additive block, keeping
-    the history item-level as required by V1.
+    `vocab_sizes` contains one entry per SID column. The final column is always
+    the dedup slot; all preceding columns are semantic codebook levels.
     """
 
     def __init__(
         self,
-        q1_size: int,
-        q2_size: int,
-        q3_size: int,
-        dedup_size: int,
-        embedding_dim: int,
+        vocab_sizes: list[int] | tuple[int, ...] | None = None,
+        embedding_dim: int = 256,
         hidden_dim: int | None = None,
         padding_idx: int = 0,
+        q1_size: int | None = None,
+        q2_size: int | None = None,
+        q3_size: int | None = None,
+        dedup_size: int | None = None,
     ) -> None:
         super().__init__()
+        if vocab_sizes is None:
+            if None in {q1_size, q2_size, q3_size, dedup_size}:
+                raise ValueError("vocab_sizes or q1/q2/q3/dedup sizes are required")
+            vocab_sizes = [int(q1_size), int(q2_size), int(q3_size), int(dedup_size)]
+        if len(vocab_sizes) < 2:
+            raise ValueError("full SID must include at least one semantic level and dedup")
         if embedding_dim <= 0:
             raise ValueError("embedding_dim must be positive")
-        if min(q1_size, q2_size, q3_size, dedup_size) <= padding_idx:
-            raise ValueError("vocabulary sizes must be greater than padding_idx")
+        if min(vocab_sizes) <= padding_idx:
+            raise ValueError("all vocabulary sizes must be greater than padding_idx")
 
+        self.vocab_sizes = [int(size) for size in vocab_sizes]
+        self.num_sid_columns = len(self.vocab_sizes)
+        self.num_semantic_levels = self.num_sid_columns - 1
         self.embedding_dim = int(embedding_dim)
         self.padding_idx = int(padding_idx)
         hidden = int(hidden_dim or embedding_dim * 2)
 
-        self.q1_embedding = torch.nn.Embedding(
-            q1_size, embedding_dim, padding_idx=padding_idx
-        )
-        self.q2_embedding = torch.nn.Embedding(
-            q2_size, embedding_dim, padding_idx=padding_idx
-        )
-        self.q3_embedding = torch.nn.Embedding(
-            q3_size, embedding_dim, padding_idx=padding_idx
+        self.semantic_embeddings = torch.nn.ModuleList(
+            [
+                torch.nn.Embedding(size, embedding_dim, padding_idx=padding_idx)
+                for size in self.vocab_sizes[:-1]
+            ]
         )
         self.dedup_embedding = torch.nn.Embedding(
-            dedup_size, embedding_dim, padding_idx=padding_idx
+            self.vocab_sizes[-1], embedding_dim, padding_idx=padding_idx
         )
         self.semantic_mlp = torch.nn.Sequential(
-            torch.nn.Linear(embedding_dim * 3, hidden),
+            torch.nn.Linear(embedding_dim * self.num_semantic_levels, hidden),
             torch.nn.SiLU(),
             torch.nn.Linear(hidden, embedding_dim),
         )
@@ -55,22 +61,19 @@ class SIDComposer(torch.nn.Module):
         self.output_norm = torch.nn.LayerNorm(embedding_dim)
 
     def forward(self, sid_tokens: torch.Tensor) -> torch.Tensor:
-        if sid_tokens.size(-1) != 4:
+        if sid_tokens.size(-1) != self.num_sid_columns:
             raise ValueError(
-                "sid_tokens must end with four values: (q1, q2, q3, d)"
+                f"sid_tokens must end with {self.num_sid_columns} SID columns"
             )
         sid_tokens = sid_tokens.to(torch.long)
-        q1, q2, q3, dedup = sid_tokens.unbind(dim=-1)
+        semantic_tokens = sid_tokens[..., :-1]
+        dedup = sid_tokens[..., -1]
 
-        q_embeddings = torch.cat(
-            [
-                self.q1_embedding(q1),
-                self.q2_embedding(q2),
-                self.q3_embedding(q3),
-            ],
-            dim=-1,
-        )
-        semantic = self.semantic_mlp(q_embeddings)
+        semantic_parts = [
+            embedding(semantic_tokens[..., level])
+            for level, embedding in enumerate(self.semantic_embeddings)
+        ]
+        semantic = self.semantic_mlp(torch.cat(semantic_parts, dim=-1))
         dedup_embedding = self.dedup_embedding(dedup)
         gate = torch.sigmoid(self.dedup_gate(torch.cat([semantic, dedup_embedding], dim=-1)))
         composed = semantic + gate * self.dedup_delta(dedup_embedding)

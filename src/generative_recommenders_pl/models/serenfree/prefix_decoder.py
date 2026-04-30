@@ -19,15 +19,32 @@ class DecoderMode(IntEnum):
 
 @dataclass(frozen=True)
 class PrefixDecoderOutput:
-    """Logits for `q1 -> q2 -> q3 -> d` SID generation."""
+    """Logits for variable-depth full-SID generation."""
 
-    q1_logits: torch.Tensor
-    q2_logits: torch.Tensor
-    q3_logits: torch.Tensor
-    dedup_logits: torch.Tensor
+    level_logits: list[torch.Tensor]
+
+    @property
+    def semantic_logits(self) -> list[torch.Tensor]:
+        return self.level_logits[:-1]
+
+    @property
+    def dedup_logits(self) -> torch.Tensor:
+        return self.level_logits[-1]
+
+    @property
+    def q1_logits(self) -> torch.Tensor:
+        return self.level_logits[0]
+
+    @property
+    def q2_logits(self) -> torch.Tensor:
+        return self.level_logits[1]
+
+    @property
+    def q3_logits(self) -> torch.Tensor:
+        return self.level_logits[2]
 
     def as_list(self) -> list[torch.Tensor]:
-        return [self.q1_logits, self.q2_logits, self.q3_logits, self.dedup_logits]
+        return self.level_logits
 
 
 class SharedPrefixDecoder(torch.nn.Module):
@@ -36,41 +53,51 @@ class SharedPrefixDecoder(torch.nn.Module):
     def __init__(
         self,
         hidden_dim: int,
-        q1_size: int,
-        q2_size: int,
-        q3_size: int,
-        dedup_size: int,
+        vocab_sizes: list[int] | tuple[int, ...] | None = None,
         prefix_dim: int | None = None,
         mode_count: int = 3,
-        level_count: int = 4,
         padding_idx: int = 0,
+        q1_size: int | None = None,
+        q2_size: int | None = None,
+        q3_size: int | None = None,
+        dedup_size: int | None = None,
     ) -> None:
         super().__init__()
+        if vocab_sizes is None:
+            if None in {q1_size, q2_size, q3_size, dedup_size}:
+                raise ValueError("vocab_sizes or q1/q2/q3/dedup sizes are required")
+            vocab_sizes = [int(q1_size), int(q2_size), int(q3_size), int(dedup_size)]
         if hidden_dim <= 0:
             raise ValueError("hidden_dim must be positive")
-        if min(q1_size, q2_size, q3_size, dedup_size) <= padding_idx:
-            raise ValueError("vocabulary sizes must be greater than padding_idx")
+        if len(vocab_sizes) < 2:
+            raise ValueError("full SID must include at least one semantic level and dedup")
+        if min(vocab_sizes) <= padding_idx:
+            raise ValueError("all vocabulary sizes must be greater than padding_idx")
 
         self.hidden_dim = int(hidden_dim)
         self.prefix_dim = int(prefix_dim or hidden_dim)
         self.padding_idx = int(padding_idx)
+        self.vocab_sizes = [int(size) for size in vocab_sizes]
+        self.num_sid_columns = len(self.vocab_sizes)
+        self.num_semantic_levels = self.num_sid_columns - 1
 
         self.mode_embedding = torch.nn.Embedding(mode_count, hidden_dim)
-        self.level_embedding = torch.nn.Embedding(level_count, hidden_dim)
-        self.q1_embedding = torch.nn.Embedding(q1_size, self.prefix_dim, padding_idx=padding_idx)
-        self.q2_embedding = torch.nn.Embedding(q2_size, self.prefix_dim, padding_idx=padding_idx)
-        self.q3_embedding = torch.nn.Embedding(q3_size, self.prefix_dim, padding_idx=padding_idx)
-
-        input_dim = hidden_dim + hidden_dim + hidden_dim + self.prefix_dim * 3
+        self.level_embedding = torch.nn.Embedding(self.num_sid_columns, hidden_dim)
+        self.prefix_embeddings = torch.nn.ModuleList(
+            [
+                torch.nn.Embedding(size, self.prefix_dim, padding_idx=padding_idx)
+                for size in self.vocab_sizes[:-1]
+            ]
+        )
+        input_dim = hidden_dim + hidden_dim + hidden_dim + self.prefix_dim * self.num_semantic_levels
         self.prefix_mlp = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.SiLU(),
             torch.nn.LayerNorm(hidden_dim),
         )
-        self.q1_head = torch.nn.Linear(hidden_dim, q1_size)
-        self.q2_head = torch.nn.Linear(hidden_dim, q2_size)
-        self.q3_head = torch.nn.Linear(hidden_dim, q3_size)
-        self.dedup_head = torch.nn.Linear(hidden_dim, dedup_size)
+        self.heads = torch.nn.ModuleList(
+            [torch.nn.Linear(hidden_dim, size) for size in self.vocab_sizes]
+        )
 
     def forward(
         self,
@@ -85,41 +112,44 @@ class SharedPrefixDecoder(torch.nn.Module):
 
         shape = context.shape[:-1]
         if prefix_tokens is None:
-            prefix_tokens = torch.zeros((*shape, 3), dtype=torch.long, device=context.device)
-        if prefix_tokens.shape != (*shape, 3):
-            raise ValueError("prefix_tokens must have shape [..., 3] for (q1, q2, q3)")
+            prefix_tokens = torch.zeros(
+                (*shape, self.num_semantic_levels),
+                dtype=torch.long,
+                device=context.device,
+            )
+        if prefix_tokens.shape != (*shape, self.num_semantic_levels):
+            raise ValueError(
+                f"prefix_tokens must have shape [..., {self.num_semantic_levels}]"
+            )
         prefix_tokens = prefix_tokens.to(torch.long)
 
         mode_ids = torch.full(shape, int(mode), dtype=torch.long, device=context.device)
         mode_emb = self.mode_embedding(mode_ids)
-        q1, q2, q3 = prefix_tokens.unbind(dim=-1)
-        empty_prefix = torch.zeros((*shape, self.prefix_dim), dtype=context.dtype, device=context.device)
+        empty_prefix = torch.zeros(
+            (*shape, self.prefix_dim), dtype=context.dtype, device=context.device
+        )
 
-        q1_state = self._state(context, mode_emb, level=0, prefix_parts=[empty_prefix, empty_prefix, empty_prefix])
-        q2_state = self._state(
-            context,
-            mode_emb,
-            level=1,
-            prefix_parts=[self.q1_embedding(q1), empty_prefix, empty_prefix],
-        )
-        q3_state = self._state(
-            context,
-            mode_emb,
-            level=2,
-            prefix_parts=[self.q1_embedding(q1), self.q2_embedding(q2), empty_prefix],
-        )
-        dedup_state = self._state(
-            context,
-            mode_emb,
-            level=3,
-            prefix_parts=[self.q1_embedding(q1), self.q2_embedding(q2), self.q3_embedding(q3)],
-        )
-        return PrefixDecoderOutput(
-            q1_logits=self.q1_head(q1_state),
-            q2_logits=self.q2_head(q2_state),
-            q3_logits=self.q3_head(q3_state),
-            dedup_logits=self.dedup_head(dedup_state),
-        )
+        logits = []
+        for level, head in enumerate(self.heads):
+            prefix_parts = self._prefix_parts(prefix_tokens, level, empty_prefix)
+            state = self._state(context, mode_emb, level, prefix_parts)
+            logits.append(head(state))
+        return PrefixDecoderOutput(level_logits=logits)
+
+    def _prefix_parts(
+        self,
+        prefix_tokens: torch.Tensor,
+        level: int,
+        empty_prefix: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        parts = []
+        known_semantic = min(level, self.num_semantic_levels)
+        for prefix_level in range(self.num_semantic_levels):
+            if prefix_level < known_semantic:
+                parts.append(self.prefix_embeddings[prefix_level](prefix_tokens[..., prefix_level]))
+            else:
+                parts.append(empty_prefix)
+        return parts
 
     def _state(
         self,
@@ -141,17 +171,22 @@ def relevance_loss(
     lambda_d: float = 1.0,
     ignore_index: int = 0,
 ) -> torch.Tensor:
-    """Cross-entropy loss for `q1, q2, q3, d` targets."""
+    """Cross-entropy loss for full-SID targets; final column is dedup."""
 
-    if targets.size(-1) != 4:
-        raise ValueError("targets must end with four values: (q1, q2, q3, d)")
-    weights = [1.0, 1.0, 1.0, float(lambda_d)]
+    if targets.size(-1) != len(output.level_logits):
+        raise ValueError("targets must have the same number of columns as logits")
+    weights = [1.0] * (len(output.level_logits) - 1) + [float(lambda_d)]
     losses = []
-    for logits, target, weight in zip(output.as_list(), targets.unbind(dim=-1), weights):
+    for logits, target, weight in zip(output.level_logits, targets.unbind(dim=-1), weights):
+        flat_target = target.reshape(-1).to(torch.long)
+        valid = flat_target != ignore_index
+        if not valid.any():
+            losses.append(logits.sum() * 0.0)
+            continue
         losses.append(
             F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
-                target.reshape(-1).to(torch.long),
+                flat_target,
                 ignore_index=ignore_index,
             )
             * weight

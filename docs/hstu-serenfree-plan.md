@@ -27,7 +27,12 @@ Main claim: collaborative-semantic sequence modeling over full SID actions plus 
 
 ## Data Assumptions
 
-- Semantic IDs exist as `(q1, q2, q3, d)` per item.
+- Semantic IDs are dataset-specific full SID rows shaped
+  `(q1, ..., qL, d)`.
+- The final SID column is always the dedup slot; all preceding columns are
+  semantic codebook levels.
+- Codebook token `0` is valid. Training lookup tables reserve internal `0` for
+  padding/missing items by shifting valid SID tokens by `+1`.
 - Current HSTU implementation already operates on item sequences.
 - Existing datasets and splits from the thesis pipeline remain authoritative.
 
@@ -40,12 +45,12 @@ Main claim: collaborative-semantic sequence modeling over full SID actions plus 
 
 ## Stage 1: Relevance-Only SID Generation
 
-Objective: train `q1 -> q2 -> q3 -> d` generation from the current HSTU hidden state.
+Objective: train `q1 -> ... -> qL -> d` generation from the current HSTU hidden state.
 
 Initial implementation slices:
 
 1. SID composer module.
-   - Input: tensors shaped `[..., 4]` containing `(q1, q2, q3, d)`.
+   - Input: tensors shaped `[..., L + 1]` containing `(q1, ..., qL, d)`.
    - Output: item-level embedding shaped `[..., H]`.
    - Verify: CPU unit test for shape, padding behavior, gradients, and dedup conditioning effect.
 2. HSTU wrapper.
@@ -53,7 +58,7 @@ Initial implementation slices:
    - Verify: CPU shape test with a tiny synthetic HSTU config.
 3. Shared prefix decoder in relevance mode.
    - One decoder conditioned on mode embedding and previous SID prefix tokens.
-   - Verify: logits for levels 1..3 and dedup, plus CE loss over synthetic targets.
+   - Verify: logits for variable semantic levels and dedup, plus CE loss over synthetic targets.
 4. Constrained SID trie and beam search.
    - Build valid SID trie from item SID table.
    - Verify: generated beams always map to known item IDs.
@@ -103,7 +108,7 @@ Success checks:
 
 ## Losses
 
-- Relevance: `L_rel = CE(q1) + CE(q2) + CE(q3) + lambda_d * CE(d)`.
+- Relevance: `L_rel = sum_l CE(q_l) + lambda_d * CE(d)`.
 - Imminent: predict next-step semantic prefixes.
 - Acceptable: predict future-window semantic distribution or sampled future positives.
 - Gap: sampled-softmax / InfoNCE-style ranking over teacher-mined candidates.
@@ -111,8 +116,8 @@ Success checks:
 
 ## Recommended Defaults
 
-- AIG-biased levels: 1 and 2 only.
-- Level 3 and dedup: relevance-only.
+- AIG-biased levels: semantic levels 1 and 2 only when present.
+- Later semantic levels and dedup: relevance-only.
 - Short window `w`: 10.
 - Future window `H`: 20.
 - `lambda_I`: 0.2.

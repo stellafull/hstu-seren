@@ -1,0 +1,49 @@
+# @package _global_
+
+defaults:
+  - override /data: amazon_movies
+  - override /model: hstu_serenfree_stage1
+  - override /callbacks: default
+  - override /logger: many_loggers
+  - override /trainer: default
+  - _self_
+
+seed: 42
+
+tags: ["ama_mv", "serenfree", "stage1", "full_sid"]
+
+data:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+
+trainer:
+  min_epochs: 1
+  max_epochs: 100
+  gradient_clip_val: 1.0
+
+model:
+  item_lookup_path: ${paths.root_dir}/tmp/pre_train/amazon_movies/item_lookup.csv
+  # Reindexed from inference_semantic_ids.pt for dataloader integer ids.
+  # SID token +1 reserves 0 for padding/missing; it does not rebuild semantic IDs.
+  sid_lookup_path: ${paths.root_dir}/tmp/semantic_id/amazon_movies/item_sid_lookup_shifted.pt
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage1
+    filename: "epoch_{epoch:03d}"
+    monitor: val/full_sid_acc
+    mode: max
+    save_last: true
+    save_top_k: 1
+  early_stopping:
+    monitor: val/full_sid_acc
+    mode: max
+    patience: 10
+
+logger:
+  tensorboard:
+    name: ama_mv_serenfree_stage1
+    version: null
+  csv:
+    name: ama_mv_serenfree_stage1

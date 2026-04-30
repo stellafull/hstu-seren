@@ -45,7 +45,23 @@ def test_sid_composer_outputs_item_level_embeddings_and_masks_padding():
     assert torch.all(output[0, 1] == 0)
     assert not torch.allclose(output[0, 0], output[1, 0])
     output.sum().backward()
-    assert composer.q1_embedding.weight.grad is not None
+    assert composer.semantic_embeddings[0].weight.grad is not None
+
+
+def test_variable_depth_sid_modules_treat_last_column_as_dedup():
+    vocab_sizes = [5, 6, 7, 8, 9]
+    composer = SIDComposer(vocab_sizes=vocab_sizes, embedding_dim=6)
+    decoder = SharedPrefixDecoder(hidden_dim=6, vocab_sizes=vocab_sizes)
+    sid_tokens = torch.tensor([[1, 2, 3, 4, 1], [2, 3, 4, 5, 1]])
+
+    embeddings = composer(sid_tokens)
+    output = decoder(embeddings, sid_tokens[:, :-1])
+    loss = relevance_loss(output, sid_tokens)
+
+    assert embeddings.shape == (2, 6)
+    assert len(output.semantic_logits) == 4
+    assert output.dedup_logits.shape == (2, 9)
+    assert loss.item() > 0
 
 
 def test_shared_prefix_decoder_relevance_loss_backpropagates():
@@ -74,7 +90,18 @@ def test_shared_prefix_decoder_relevance_loss_backpropagates():
     loss = relevance_loss(output, targets, lambda_d=0.5)
     assert loss.item() > 0
     loss.backward()
-    assert decoder.q1_head.weight.grad is not None
+    assert decoder.heads[0].weight.grad is not None
+
+
+def test_relevance_loss_handles_all_padding_targets_without_nan():
+    decoder = SharedPrefixDecoder(hidden_dim=4, vocab_sizes=[3, 3, 3])
+    context = torch.randn(2, 4)
+    targets = torch.zeros(2, 3, dtype=torch.long)
+
+    loss = relevance_loss(decoder(context, targets[:, :-1]), targets)
+
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0
 
 
 def test_hstu_state_wrapper_exposes_recent_and_history_pools():
@@ -129,7 +156,9 @@ def test_sid_trie_constrained_beam_search_returns_only_valid_items():
 
 if __name__ == "__main__":
     test_sid_composer_outputs_item_level_embeddings_and_masks_padding()
+    test_variable_depth_sid_modules_treat_last_column_as_dedup()
     test_shared_prefix_decoder_relevance_loss_backpropagates()
+    test_relevance_loss_handles_all_padding_targets_without_nan()
     test_hstu_state_wrapper_exposes_recent_and_history_pools()
     test_sid_trie_constrained_beam_search_returns_only_valid_items()
     print("SERENFREE_STAGE1_TESTS_OK")

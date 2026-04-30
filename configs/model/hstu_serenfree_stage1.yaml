@@ -1,0 +1,42 @@
+_target_: generative_recommenders_pl.models.hstu_serenfree.HSTUSerenFreeStage1
+
+sid_path: ${paths.root_dir}/tmp/semantic_id/${model.semantic_id_prefix}/inference_semantic_ids.pt
+item_lookup_path: null
+item_lookup_is_zero_based: true
+semantic_id_prefix: ${oc.select:data.semantic_id_prefix,${data.data_preprocessor.prefix}}
+
+embedding_dim: 256
+lambda_d: 1.0
+compile_model: false
+
+sequence_encoder:
+  _target_: generative_recommenders_pl.models.sequential_encoders.hstu.HSTU
+  max_sequence_len: ${data.max_sequence_length}
+  max_output_len: 0
+  embedding_dim: ${model.embedding_dim}
+  item_embedding_dim: ${model.embedding_dim}
+  num_blocks: 8
+  num_heads: 4
+  attention_dim: ${model.embedding_dim}
+  linear_dim: ${model.embedding_dim}
+  linear_dropout_rate: 0.2
+  attn_dropout_rate: 0.0
+  normalization: rel_bias
+  linear_config: uvqk
+  linear_activation: silu
+  concat_ua: false
+  enable_relative_attention_bias: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.001
+  betas: [0.9, 0.98]
+  weight_decay: 0.001
+
+scheduler: null
+
+configure_optimizer_params:
+  monitor: val/full_sid_acc
+  interval: epoch
+  frequency: 1
