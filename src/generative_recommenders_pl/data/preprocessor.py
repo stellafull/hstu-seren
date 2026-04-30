@@ -803,8 +803,8 @@ class SerendipityAnswersDataProcessor(MovielensDataProcessor):
             raise ValueError(
                 f"Serendipity signal columns missing in answers file: {missing}"
             )
-        ser_flags = ratings[self._ser_columns].applymap(
-            lambda value: str(value).lower() == "true"
+        ser_flags = ratings[self._ser_columns].apply(
+            lambda column: column.map(lambda value: str(value).lower() == "true")
         )
         ser_label = ser_flags.any(axis=1).astype(int)
         ratings = ratings.copy()
