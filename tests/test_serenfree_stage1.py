@@ -1,0 +1,135 @@
+import torch
+
+from generative_recommenders_pl.models.serenfree import (
+    DecoderMode,
+    HSTUStateWrapper,
+    SIDComposer,
+    SIDTrie,
+    SharedPrefixDecoder,
+    constrained_beam_search,
+    relevance_loss,
+)
+
+
+class _OffsetEncoder(torch.nn.Module):
+    def forward(
+        self,
+        past_lengths,
+        user_embeddings,
+        valid_mask,
+        past_payloads,
+        **kwargs,
+    ):
+        del past_lengths, valid_mask, past_payloads, kwargs
+        return user_embeddings + 1.0, ["cache"]
+
+
+def test_sid_composer_outputs_item_level_embeddings_and_masks_padding():
+    composer = SIDComposer(
+        q1_size=8,
+        q2_size=9,
+        q3_size=10,
+        dedup_size=11,
+        embedding_dim=6,
+    )
+    sid_tokens = torch.tensor(
+        [
+            [[1, 2, 3, 4], [0, 0, 0, 0]],
+            [[1, 2, 3, 5], [2, 3, 4, 5]],
+        ]
+    )
+
+    output = composer(sid_tokens)
+
+    assert output.shape == (2, 2, 6)
+    assert torch.all(output[0, 1] == 0)
+    assert not torch.allclose(output[0, 0], output[1, 0])
+    output.sum().backward()
+    assert composer.q1_embedding.weight.grad is not None
+
+
+def test_shared_prefix_decoder_relevance_loss_backpropagates():
+    decoder = SharedPrefixDecoder(
+        hidden_dim=8,
+        q1_size=5,
+        q2_size=6,
+        q3_size=7,
+        dedup_size=8,
+    )
+    context = torch.randn(3, 8)
+    targets = torch.tensor(
+        [
+            [1, 2, 3, 4],
+            [2, 3, 4, 5],
+            [3, 4, 5, 6],
+        ]
+    )
+    output = decoder(context, targets[:, :3], mode=DecoderMode.RELEVANCE)
+
+    assert output.q1_logits.shape == (3, 5)
+    assert output.q2_logits.shape == (3, 6)
+    assert output.q3_logits.shape == (3, 7)
+    assert output.dedup_logits.shape == (3, 8)
+
+    loss = relevance_loss(output, targets, lambda_d=0.5)
+    assert loss.item() > 0
+    loss.backward()
+    assert decoder.q1_head.weight.grad is not None
+
+
+def test_hstu_state_wrapper_exposes_recent_and_history_pools():
+    wrapper = HSTUStateWrapper(_OffsetEncoder(), recent_window=2)
+    user_embeddings = torch.arange(2 * 4 * 3, dtype=torch.float32).view(2, 4, 3)
+    output = wrapper(
+        past_lengths=torch.tensor([3, 4]),
+        user_embeddings=user_embeddings,
+        valid_mask=torch.ones(2, 4, 1),
+        past_payloads={},
+    )
+
+    hidden = user_embeddings + 1.0
+    assert torch.equal(output.hidden_states, hidden)
+    assert output.cache_states == ["cache"]
+    assert torch.allclose(output.history_state[0], hidden[0, :3].mean(dim=0))
+    assert torch.allclose(output.history_state[1], hidden[1, :4].mean(dim=0))
+    assert torch.allclose(output.recent_state[0], hidden[0, 1:3].mean(dim=0))
+    assert torch.allclose(output.recent_state[1], hidden[1, 2:4].mean(dim=0))
+
+
+def test_sid_trie_constrained_beam_search_returns_only_valid_items():
+    decoder = SharedPrefixDecoder(
+        hidden_dim=8,
+        q1_size=6,
+        q2_size=6,
+        q3_size=6,
+        dedup_size=6,
+    )
+    item_ids = torch.tensor([10, 20, 30])
+    sid_tokens = torch.tensor(
+        [
+            [1, 1, 1, 1],
+            [1, 2, 3, 4],
+            [2, 1, 3, 5],
+        ]
+    )
+    trie = SIDTrie.from_items(item_ids, sid_tokens)
+    context = torch.randn(2, 8)
+
+    results = constrained_beam_search(decoder, context, trie, beam_size=2)
+
+    assert len(results) == 2
+    valid_items = set(item_ids.tolist())
+    valid_sids = {tuple(row.tolist()) for row in sid_tokens}
+    for row in results:
+        assert 1 <= len(row) <= 2
+        for beam in row:
+            assert beam.item_id in valid_items
+            assert beam.sid in valid_sids
+
+
+if __name__ == "__main__":
+    test_sid_composer_outputs_item_level_embeddings_and_masks_padding()
+    test_shared_prefix_decoder_relevance_loss_backpropagates()
+    test_hstu_state_wrapper_exposes_recent_and_history_pools()
+    test_sid_trie_constrained_beam_search_returns_only_valid_items()
+    print("SERENFREE_STAGE1_TESTS_OK")
