@@ -1,0 +1,34 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_amazon_movies
+  - _self_
+
+tags: ["ama_mv", "serenfree", "stage2", "dual_horizon", "full_sid"]
+
+model:
+  lambda_i: 0.2
+  lambda_a: 0.2
+  acceptable_window: 20
+  recent_window: 10
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage2
+    monitor: val/full_sid_acc
+    mode: max
+  early_stopping:
+    monitor: val/full_sid_acc
+    mode: max
+    patience: 10
+
+logger:
+  tensorboard:
+    name: ama_mv_serenfree_stage2
+    version: null
+  csv:
+    name: ama_mv_serenfree_stage2
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage2/last.ckpt
+  output_json: ${paths.root_dir}/logs/serenfree_stage2_amazon_movies/retrieval_eval_test.json

@@ -192,3 +192,52 @@ def relevance_loss(
             * weight
         )
     return torch.stack(losses).sum()
+
+
+def semantic_loss(
+    output: PrefixDecoderOutput,
+    targets: torch.Tensor,
+    ignore_index: int = 0,
+) -> torch.Tensor:
+    """Cross-entropy over semantic SID columns only; excludes final dedup."""
+
+    semantic_logits = output.semantic_logits
+    if targets.size(-1) < len(semantic_logits):
+        raise ValueError("targets must include all semantic SID columns")
+    losses = []
+    for logits, target in zip(semantic_logits, targets[..., : len(semantic_logits)].unbind(dim=-1)):
+        flat_target = target.reshape(-1).to(torch.long)
+        valid = flat_target != ignore_index
+        if not valid.any():
+            losses.append(logits.sum() * 0.0)
+            continue
+        losses.append(
+            F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                flat_target,
+                ignore_index=ignore_index,
+            )
+        )
+    return torch.stack(losses).sum()
+
+
+def semantic_js_divergence(
+    left: PrefixDecoderOutput,
+    right: PrefixDecoderOutput,
+) -> torch.Tensor:
+    """Mean JS divergence across semantic levels for collapse monitoring."""
+
+    if len(left.semantic_logits) != len(right.semantic_logits):
+        raise ValueError("outputs must have the same number of semantic levels")
+    divergences = []
+    for left_logits, right_logits in zip(left.semantic_logits, right.semantic_logits):
+        left_log_probs = F.log_softmax(left_logits, dim=-1)
+        right_log_probs = F.log_softmax(right_logits, dim=-1)
+        left_probs = left_log_probs.exp()
+        right_probs = right_log_probs.exp()
+        mixture = 0.5 * (left_probs + right_probs)
+        mixture_log = mixture.clamp_min(torch.finfo(mixture.dtype).tiny).log()
+        left_kl = (left_probs * (left_log_probs - mixture_log)).sum(dim=-1)
+        right_kl = (right_probs * (right_log_probs - mixture_log)).sum(dim=-1)
+        divergences.append(0.5 * (left_kl + right_kl).mean())
+    return torch.stack(divergences).mean()

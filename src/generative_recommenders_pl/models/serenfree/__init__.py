@@ -10,6 +10,8 @@ from generative_recommenders_pl.models.serenfree.prefix_decoder import (
     PrefixDecoderOutput,
     SharedPrefixDecoder,
     relevance_loss,
+    semantic_js_divergence,
+    semantic_loss,
 )
 from generative_recommenders_pl.models.serenfree.sid_trie import (
     SIDBeam,
@@ -28,4 +30,6 @@ __all__ = [
     "SharedPrefixDecoder",
     "constrained_beam_search",
     "relevance_loss",
+    "semantic_js_divergence",
+    "semantic_loss",
 ]

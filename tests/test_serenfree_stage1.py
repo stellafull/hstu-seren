@@ -8,6 +8,8 @@ from generative_recommenders_pl.models.serenfree import (
     SharedPrefixDecoder,
     constrained_beam_search,
     relevance_loss,
+    semantic_js_divergence,
+    semantic_loss,
 )
 
 
@@ -104,6 +106,35 @@ def test_relevance_loss_handles_all_padding_targets_without_nan():
     assert loss.item() == 0.0
 
 
+def test_semantic_loss_excludes_final_dedup_head():
+    decoder = SharedPrefixDecoder(hidden_dim=4, vocab_sizes=[5, 6, 7])
+    context = torch.randn(2, 4)
+    targets = torch.tensor([[1, 2, 3], [2, 3, 4]])
+
+    output = decoder(context, targets[:, :-1], mode=DecoderMode.IMMINENT)
+    loss = semantic_loss(output, targets)
+    loss.backward()
+
+    assert loss.item() > 0
+    assert decoder.heads[0].weight.grad is not None
+    assert decoder.heads[1].weight.grad is not None
+    assert decoder.heads[2].weight.grad is None
+
+
+def test_semantic_js_divergence_is_finite():
+    decoder = SharedPrefixDecoder(hidden_dim=4, vocab_sizes=[5, 6, 7])
+    context = torch.randn(2, 4)
+    targets = torch.tensor([[1, 2, 3], [2, 3, 4]])
+
+    left = decoder(context, targets[:, :-1], mode=DecoderMode.IMMINENT)
+    right = decoder(context, targets[:, :-1], mode=DecoderMode.ACCEPTABLE)
+
+    divergence = semantic_js_divergence(left, right)
+
+    assert torch.isfinite(divergence)
+    assert divergence.item() >= 0.0
+
+
 def test_hstu_state_wrapper_exposes_recent_and_history_pools():
     wrapper = HSTUStateWrapper(_OffsetEncoder(), recent_window=2)
     user_embeddings = torch.arange(2 * 4 * 3, dtype=torch.float32).view(2, 4, 3)
@@ -159,6 +190,8 @@ if __name__ == "__main__":
     test_variable_depth_sid_modules_treat_last_column_as_dedup()
     test_shared_prefix_decoder_relevance_loss_backpropagates()
     test_relevance_loss_handles_all_padding_targets_without_nan()
+    test_semantic_loss_excludes_final_dedup_head()
+    test_semantic_js_divergence_is_finite()
     test_hstu_state_wrapper_exposes_recent_and_history_pools()
     test_sid_trie_constrained_beam_search_returns_only_valid_items()
     print("SERENFREE_STAGE1_TESTS_OK")

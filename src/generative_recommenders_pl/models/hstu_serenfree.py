@@ -12,9 +12,12 @@ from omegaconf import DictConfig, OmegaConf
 
 from generative_recommenders_pl.data.reco_dataset import RecoDataModule
 from generative_recommenders_pl.models.serenfree import (
+    DecoderMode,
     SIDComposer,
     SharedPrefixDecoder,
     relevance_loss,
+    semantic_js_divergence,
+    semantic_loss,
 )
 from generative_recommenders_pl.models.sequential_encoders.hstu import HSTU, TIMESTAMPS_KEY
 from generative_recommenders_pl.models.utils.initialization import truncated_normal
@@ -45,6 +48,10 @@ class HSTUSerenFreeStage1(L.LightningModule):
         embedding_dim: int = 256,
         input_dropout: float = 0.2,
         lambda_d: float = 1.0,
+        lambda_i: float = 0.0,
+        lambda_a: float = 0.0,
+        acceptable_window: int = 20,
+        recent_window: int = 10,
         compile_model: bool = False,
     ) -> None:
         super().__init__()
@@ -58,6 +65,10 @@ class HSTUSerenFreeStage1(L.LightningModule):
             or {"monitor": "val/full_sid_acc", "interval": "epoch", "frequency": 1}
         )
         self.lambda_d = float(lambda_d)
+        self.lambda_i = float(lambda_i)
+        self.lambda_a = float(lambda_a)
+        self.acceptable_window = int(acceptable_window)
+        self.recent_window = int(recent_window)
         self.compile_model = bool(compile_model)
         self._compiled = False
 
@@ -168,10 +179,42 @@ class HSTUSerenFreeStage1(L.LightningModule):
             valid_mask=valid_mask,
             past_payloads={TIMESTAMPS_KEY: timestamps},
         )
-        context = self._last_valid_state(encoded, lengths)
-        decoded = self.decoder(context, target_sid[:, :-1])
+        recent_context = self._last_valid_state(encoded, lengths)
+        history_context = self._masked_history_mean(encoded, lengths)
+        decoded = self.decoder(recent_context, target_sid[:, :-1], mode=DecoderMode.RELEVANCE)
         loss = relevance_loss(decoded, target_sid, lambda_d=self.lambda_d)
         metrics = self._prefix_metrics(decoded.as_list(), target_sid)
+
+        if self.lambda_i > 0:
+            imminent = self.decoder(
+                recent_context,
+                target_sid[:, :-1],
+                mode=DecoderMode.IMMINENT,
+            )
+            imminent_loss = semantic_loss(imminent, target_sid)
+            loss = loss + self.lambda_i * imminent_loss
+            metrics["imminent_loss"] = imminent_loss.detach()
+        else:
+            imminent = None
+
+        if self.lambda_a > 0:
+            acceptable_targets = self._acceptable_semantic_targets(
+                historical_ids=historical_ids,
+                lengths=lengths,
+            )
+            acceptable = self.decoder(
+                history_context,
+                acceptable_targets,
+                mode=DecoderMode.ACCEPTABLE,
+            )
+            acceptable_loss = semantic_loss(acceptable, acceptable_targets)
+            loss = loss + self.lambda_a * acceptable_loss
+            metrics["acceptable_loss"] = acceptable_loss.detach()
+            if imminent is not None:
+                metrics["js_pa_pi"] = semantic_js_divergence(
+                    acceptable,
+                    imminent,
+                ).detach()
         return loss, metrics
 
     def _item_ids_to_sid(self, item_ids: torch.Tensor) -> torch.Tensor:
@@ -198,6 +241,39 @@ class HSTUSerenFreeStage1(L.LightningModule):
         row_offsets = torch.arange(batch_size, device=encoded.device) * seq_len
         indices = (lengths.to(torch.long).clamp(min=1, max=seq_len) - 1) + row_offsets
         return encoded.reshape(batch_size * seq_len, hidden_dim)[indices]
+
+    def _masked_history_mean(
+        self,
+        encoded: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        seq_len = encoded.size(1)
+        positions = torch.arange(seq_len, device=encoded.device).unsqueeze(0)
+        mask = positions < lengths.to(torch.long).unsqueeze(1)
+        weights = mask.to(encoded.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return (encoded * weights).sum(dim=1) / denom
+
+    def _acceptable_semantic_targets(
+        self,
+        historical_ids: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Proxy acceptable target from the recent history window.
+
+        The current dataloader exposes one next-item target and the preceding
+        history, but not a separate future window. For Stage 2 on Amazon Movies
+        we use the far edge of a recent history window as a broader semantic
+        proxy and exclude the final dedup column from loss.
+        """
+
+        seq_len = historical_ids.size(1)
+        clamped_lengths = lengths.to(torch.long).clamp(min=1, max=seq_len)
+        window = max(self.acceptable_window, 1)
+        offsets = (clamped_lengths - min(window, seq_len)).clamp_min(0)
+        row_offsets = torch.arange(historical_ids.size(0), device=historical_ids.device) * seq_len
+        item_ids = historical_ids.reshape(-1)[row_offsets + offsets]
+        return self._item_ids_to_sid(item_ids)[:, :-1]
 
     def _prefix_metrics(
         self, logits_by_level: list[torch.Tensor], target_sid: torch.Tensor
