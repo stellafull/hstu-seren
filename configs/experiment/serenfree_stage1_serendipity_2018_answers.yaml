@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_serendipity_2018
+  - override /data: serendipity_2018_answers
+  - _self_
+
+tags: ["serendipity_2018_answers", "serenfree", "stage1", "full_sid"]
+
+data:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/serendipity_2018_serenfree_stage1/last.ckpt
+  split: test
+  device: cuda
+  beam_size: 400
+  ks: [10, 50, 100, 200]
+  max_batches: null
+  filter_history: true
+  allow_duplicate_sids: false
+  progress_every: 10
+  output_json: ${paths.root_dir}/logs/serenfree_stage1_serendipity_2018_answers/retrieval_eval_test.json
