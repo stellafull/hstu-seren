@@ -64,7 +64,12 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             map_location="cpu",
             weights_only=False,
         )
-        missing, unexpected = model.load_state_dict(checkpoint["state_dict"], strict=False)
+        state_dict = {
+            name: value
+            for name, value in checkpoint["state_dict"].items()
+            if name != "pseudo_ser_items"
+        }
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             log.info(
                 "Non-strict checkpoint init completed with missing=%s unexpected=%s",
