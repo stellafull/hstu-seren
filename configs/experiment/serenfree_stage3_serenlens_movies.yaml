@@ -1,0 +1,15 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage2_serenlens_movies
+  - _self_
+
+tags: ["serenlens_movies", "serenfree", "stage3", "aig", "full_sid"]
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage2/epoch_000.ckpt
+  aig: true
+  aig_alpha: 0.5
+  aig_levels: [1, 2]
+  aig_gate_min_acceptable_prob: 0.0
+  output_json: ${paths.root_dir}/logs/serenfree_stage3_serenlens_movies/retrieval_eval_test.json

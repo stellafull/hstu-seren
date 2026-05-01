@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_amazon_movies
+  - override /data: serendipity_2018_training
+  - _self_
+
+tags: ["serendipity_2018", "serenfree", "stage1", "full_sid"]
+
+data:
+  batch_size: 128
+  num_workers: 8
+  pin_memory: true
+
+model:
+  item_lookup_path: ${paths.root_dir}/tmp/pre_train/serendipity-2018/item_lookup.csv
+  sid_lookup_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/item_sid_lookup_shifted.pt
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/serendipity_2018_serenfree_stage1
+
+logger:
+  tensorboard:
+    name: serendipity_2018_serenfree_stage1
+  csv:
+    name: serendipity_2018_serenfree_stage1
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/serendipity_2018_serenfree_stage1/last.ckpt
+  output_json: ${paths.root_dir}/logs/serenfree_stage1_serendipity_2018/retrieval_eval_test.json

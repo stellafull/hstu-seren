@@ -1,0 +1,27 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage2_amazon_books
+  - override /data: serenlens_books
+  - _self_
+
+tags: ["serenlens_books", "serenfree", "stage2", "dual_horizon", "full_sid"]
+
+data:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+
+init_from_checkpoint: null
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage2/last.ckpt
+  split: test
+  device: cuda
+  beam_size: 400
+  ks: [10, 50, 100, 200]
+  max_batches: null
+  filter_history: true
+  allow_duplicate_sids: false
+  progress_every: 10
+  output_json: ${paths.root_dir}/logs/serenfree_stage2_serenlens_books/retrieval_eval_test.json

@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_amazon_books
+  - _self_
+
+tags: ["amazon_books", "serenfree", "stage2", "dual_horizon", "full_sid"]
+
+init_from_checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage1/last.ckpt
+
+model:
+  lambda_i: 0.2
+  lambda_a: 0.2
+  acceptable_window: 20
+  recent_window: 10
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage2
+  early_stopping:
+    patience: 10
+
+logger:
+  tensorboard:
+    name: amazon_books_serenfree_stage2
+  csv:
+    name: amazon_books_serenfree_stage2
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage2/last.ckpt
+  output_json: ${paths.root_dir}/logs/serenfree_stage2_amazon_books/retrieval_eval_test.json

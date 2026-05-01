@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_amazon_movies
+  - override /data: amazon_books
+  - _self_
+
+tags: ["amazon_books", "serenfree", "stage1", "full_sid"]
+
+model:
+  item_lookup_path: ${paths.root_dir}/tmp/pre_train/amazon_books/item_lookup.csv
+  sid_lookup_path: ${paths.root_dir}/tmp/semantic_id/amazon_books/item_sid_lookup_shifted.pt
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage1
+
+logger:
+  tensorboard:
+    name: amazon_books_serenfree_stage1
+  csv:
+    name: amazon_books_serenfree_stage1
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage1/last.ckpt
+  output_json: ${paths.root_dir}/logs/serenfree_stage1_amazon_books/retrieval_eval_test.json

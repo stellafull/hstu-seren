@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage3_serenlens_books
+  - _self_
+
+tags: ["serenlens_books", "serenfree", "stage4", "teacher_mined", "full_sid"]
+
+model:
+  lambda_g: 0.05
+  pseudo_ser_path: ${paths.root_dir}/tmp/serenfree/amazon_books/pseudo_ser_train.parquet
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage4/last.ckpt
+  pseudo_ser_path: null
+  output_json: ${paths.root_dir}/logs/serenfree_stage4_serenlens_books/retrieval_eval_test.json

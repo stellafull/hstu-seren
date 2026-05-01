@@ -1,0 +1,32 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage2_amazon_books
+  - _self_
+
+tags: ["amazon_books", "serenfree", "stage4", "teacher_mined", "full_sid"]
+
+init_from_checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage2/last.ckpt
+
+model:
+  lambda_g: 0.05
+  pseudo_ser_path: ${paths.root_dir}/tmp/serenfree/amazon_books/pseudo_ser_train.parquet
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage4
+
+logger:
+  tensorboard:
+    name: amazon_books_serenfree_stage4
+  csv:
+    name: amazon_books_serenfree_stage4
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_books_serenfree_stage4/last.ckpt
+  aig: true
+  aig_alpha: 0.5
+  aig_levels: [1, 2]
+  aig_gate_min_acceptable_prob: 0.0
+  pseudo_ser_path: ${paths.root_dir}/tmp/serenfree/amazon_books/pseudo_ser_train.parquet
+  output_json: ${paths.root_dir}/logs/serenfree_stage4_amazon_books/retrieval_eval_test.json

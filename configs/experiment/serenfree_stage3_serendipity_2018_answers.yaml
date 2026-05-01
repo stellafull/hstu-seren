@@ -1,0 +1,15 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage2_serendipity_2018_answers
+  - _self_
+
+tags: ["serendipity_2018_answers", "serenfree", "stage3", "aig", "full_sid"]
+
+serenfree_eval:
+  checkpoint: ${paths.root_dir}/tmp/checkpoints/serendipity_2018_serenfree_stage2/last.ckpt
+  aig: true
+  aig_alpha: 0.5
+  aig_levels: [1, 2]
+  aig_gate_min_acceptable_prob: 0.0
+  output_json: ${paths.root_dir}/logs/serenfree_stage3_serendipity_2018_answers/retrieval_eval_test.json
