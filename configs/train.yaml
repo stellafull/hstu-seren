@@ -45,5 +45,8 @@ test: True
 # simply provide checkpoint path to resume training
 ckpt_path: null
 
+# load only model weights before a fresh training run; optimizer/epoch state is not restored
+init_from_checkpoint: null
+
 # seed for random number generators in pytorch, numpy and python.random
 seed: null

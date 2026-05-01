@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--no-filter-history", action="store_true")
     parser.add_argument("--allow-duplicate-sids", action="store_true")
+    parser.add_argument("--aig", action="store_true")
+    parser.add_argument("--aig-alpha", type=float, default=None)
+    parser.add_argument("--aig-levels", type=int, nargs="+", default=None)
+    parser.add_argument("--aig-gate-min-acceptable-prob", type=float, default=None)
+    parser.add_argument("--pseudo-ser-path", type=Path, default=None)
     parser.add_argument("--progress-every", type=int, default=None)
     parser.add_argument(
         "--override",
@@ -87,6 +92,7 @@ def main() -> None:
         allow_duplicate_sids=args.allow_duplicate_sids,
     )
     audit = audit_pipeline(model=model, trie_audit=trie_audit, cfg=cfg, args=args)
+    aig_config = AIGConfig.from_args(args)
     metrics = evaluate(
         model=model,
         dataloader=dataloader,
@@ -97,6 +103,8 @@ def main() -> None:
         filter_history=args.filter_history,
         max_batches=args.max_batches,
         progress_every=args.progress_every,
+        aig=aig_config,
+        pseudo_ser_labels=load_pseudo_ser_labels(args.pseudo_ser_path),
     )
     output = {"audit": audit, "metrics": metrics}
     print(json.dumps(output, indent=2, sort_keys=True), flush=True)
@@ -154,6 +162,22 @@ def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
     args.allow_duplicate_sids = bool(
         args.allow_duplicate_sids or configured("allow_duplicate_sids", False)
     )
+    args.aig = bool(args.aig or configured("aig", False))
+    if args.aig_alpha is None:
+        args.aig_alpha = float(configured("aig_alpha", 0.0))
+    if args.aig_levels is None:
+        args.aig_levels = [
+            int(level) for level in configured("aig_levels", [1, 2])
+        ]
+    if args.aig_gate_min_acceptable_prob is None:
+        args.aig_gate_min_acceptable_prob = float(
+            configured("aig_gate_min_acceptable_prob", 0.0)
+        )
+    if args.pseudo_ser_path is None:
+        pseudo_ser_path = configured("pseudo_ser_path", None)
+        args.pseudo_ser_path = (
+            None if pseudo_ser_path is None else Path(str(pseudo_ser_path))
+        )
     if args.progress_every is None:
         args.progress_every = int(configured("progress_every", 10))
 
@@ -176,6 +200,15 @@ class SIDTransitionIndex:
             child_item_ids=[tensor.to(device) for tensor in self.child_item_ids],
             child_valid=[tensor.to(device) for tensor in self.child_valid],
         )
+
+
+@dataclass(frozen=True)
+class EvalContexts:
+    """Decoder contexts for relevance, imminent, and acceptable modes."""
+
+    relevance: torch.Tensor
+    imminent: torch.Tensor
+    acceptable: torch.Tensor
 
 
 def build_sid_transition_index(
@@ -306,7 +339,15 @@ def audit_pipeline(
         "full_sid_out": hasattr(model, "decoder")
         and len(model.decoder.heads) == trie_audit["sid_columns"],
         "item_level_hstu": hasattr(model, "sequence_encoder"),
-        "aig_present": any("aig" in name.lower() for name, _ in model.named_modules()),
+        "aig_bias_supported": True,
+        "aig_enabled": bool(args.aig),
+        "aig_alpha": float(args.aig_alpha),
+        "aig_levels": args.aig_levels,
+        "aig_touches_dedup": (trie_audit["dedup_column"] + 1) in args.aig_levels,
+        "aig_gate_min_acceptable_prob": float(args.aig_gate_min_acceptable_prob),
+        "pseudo_ser_path": None
+        if args.pseudo_ser_path is None
+        else str(args.pseudo_ser_path),
         "dedup_relevance_only_for_stage1": True,
         "sid_lookup_path": str(cfg.model.get("sid_lookup_path")),
         "sid_path": str(cfg.model.sid_path),
@@ -325,9 +366,15 @@ def evaluate(
     filter_history: bool,
     max_batches: int | None,
     progress_every: int,
+    aig: "AIGConfig | None",
+    pseudo_ser_labels: set[int] | None,
 ) -> dict[str, Any]:
     sid_index = sid_index.to(device)
-    totals = {"all": new_totals(ks), "eligible": new_totals(ks)}
+    totals = {
+        "all": new_totals(ks),
+        "eligible": new_totals(ks),
+        "ser": new_totals(ks, prefix="_ser"),
+    }
     counts = defaultdict(int)
     max_k = max(ks)
     started_at = time.monotonic()
@@ -336,16 +383,18 @@ def evaluate(
     for batch_idx, batch in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
             break
-        context = encode_context(model=model, batch=batch, device=device)
+        contexts = encode_contexts(model=model, batch=batch, device=device)
         beams_by_row = batched_constrained_beam_search(
             decoder=model.decoder,
-            context=context,
+            contexts=contexts,
             sid_index=sid_index,
             beam_size=beam_size,
+            aig=aig,
         )
 
         target_ids = batch["target_ids"].to(torch.long)
         history_ids = batch["historical_ids"].to(torch.long)
+        target_ser_labels = batch.get("target_ser_label")
         target_sids = model._item_ids_to_sid(target_ids.to(device)).cpu()
         target_has_sid = (target_sids != 0).all(dim=1)
 
@@ -372,6 +421,18 @@ def evaluate(
                 counts["eligible"] += 1
             else:
                 counts["unmapped_target"] += 1
+            has_true_ser_label = (
+                target_ser_labels is not None
+                and int(target_ser_labels[row_idx].item()) == 1
+            )
+            has_pseudo_ser_label = pseudo_ser_labels is not None and target in pseudo_ser_labels
+            if has_true_ser_label or has_pseudo_ser_label:
+                update_totals(totals["ser"], ranked, target, ks, prefix="_ser")
+                counts["ser_label"] += 1
+                if has_true_ser_label:
+                    counts["true_ser_label"] += 1
+                if has_pseudo_ser_label:
+                    counts["pseudo_ser_label"] += 1
 
         if progress_every > 0 and (batch_idx + 1) % progress_every == 0:
             elapsed = time.monotonic() - started_at
@@ -387,7 +448,7 @@ def evaluate(
             }
             print(json.dumps(progress, sort_keys=True), flush=True)
 
-    return {
+    result = {
         "counts": dict(counts),
         "all": finalize_totals(totals["all"], counts["all"], ks),
         "eligible_targets_only": finalize_totals(
@@ -395,15 +456,22 @@ def evaluate(
             counts["eligible"],
             ks,
         ),
+        "ser_targets_only": finalize_totals(
+            totals["ser"],
+            counts["ser_label"],
+            ks,
+            prefix="_ser",
+        ),
     }
+    return result
 
 
 @torch.inference_mode()
-def encode_context(
+def encode_contexts(
     model: torch.nn.Module,
     batch: dict[str, torch.Tensor],
     device: torch.device,
-) -> torch.Tensor:
+) -> EvalContexts:
     historical_ids = batch["historical_ids"].to(device)
     lengths = batch["history_lengths"].to(device)
     timestamps = batch["historical_timestamps"].to(device)
@@ -418,16 +486,36 @@ def encode_context(
         valid_mask=valid_mask,
         past_payloads={"timestamps": timestamps},
     )
-    return model._last_valid_state(encoded, lengths)
+    relevance = model._last_valid_state(encoded, lengths)
+    if hasattr(model, "_masked_recent_mean"):
+        imminent = model._masked_recent_mean(
+            encoded,
+            lengths,
+            getattr(model, "recent_window", 10),
+        )
+    else:
+        imminent = relevance
+    acceptable = (
+        model._masked_history_mean(encoded, lengths)
+        if hasattr(model, "_masked_history_mean")
+        else relevance
+    )
+    return EvalContexts(
+        relevance=relevance,
+        imminent=imminent,
+        acceptable=acceptable,
+    )
 
 
 @torch.inference_mode()
 def batched_constrained_beam_search(
     decoder: torch.nn.Module,
-    context: torch.Tensor,
+    contexts: EvalContexts,
     sid_index: SIDTransitionIndex,
     beam_size: int,
+    aig: "AIGConfig | None" = None,
 ) -> list[list[SIDBeam]]:
+    context = contexts.relevance
     batch_size = int(context.size(0))
     semantic_levels = int(decoder.num_semantic_levels)
     scores = context.new_zeros((batch_size, 1))
@@ -451,7 +539,30 @@ def batched_constrained_beam_search(
             context=context.unsqueeze(1).expand(-1, beam_count, -1),
             prefix_tokens=prefix_tokens,
             level=level,
+            mode=DecoderMode.RELEVANCE,
         )
+        if aig is not None and aig.applies_to(level):
+            acceptable_logits = decoder_level_logits(
+                decoder=decoder,
+                context=contexts.acceptable.unsqueeze(1).expand(-1, beam_count, -1),
+                prefix_tokens=prefix_tokens,
+                level=level,
+                mode=DecoderMode.ACCEPTABLE,
+            )
+            imminent_logits = decoder_level_logits(
+                decoder=decoder,
+                context=contexts.imminent.unsqueeze(1).expand(-1, beam_count, -1),
+                prefix_tokens=prefix_tokens,
+                level=level,
+                mode=DecoderMode.IMMINENT,
+            )
+            logits = apply_aig_bias(
+                relevance_logits=logits,
+                acceptable_logits=acceptable_logits,
+                imminent_logits=imminent_logits,
+                alpha=aig.alpha,
+                gate_min_acceptable_prob=aig.gate_min_acceptable_prob,
+            )
         log_probs = F.log_softmax(logits, dim=-1)
 
         flat_nodes = node_ids.reshape(-1)
@@ -522,11 +633,12 @@ def decoder_level_logits(
     context: torch.Tensor,
     prefix_tokens: torch.Tensor,
     level: int,
+    mode: DecoderMode,
 ) -> torch.Tensor:
     shape = context.shape[:-1]
     mode_ids = torch.full(
         shape,
-        int(DecoderMode.RELEVANCE),
+        int(mode),
         dtype=torch.long,
         device=context.device,
     )
@@ -539,6 +651,67 @@ def decoder_level_logits(
     prefix_parts = decoder._prefix_parts(prefix_tokens, level, empty_prefix)
     state = decoder._state(context, mode_emb, level, prefix_parts)
     return decoder.heads[level](state)
+
+
+@dataclass(frozen=True)
+class AIGConfig:
+    """Inference-only Acceptability-Imminence Gap settings."""
+
+    alpha: float
+    levels_zero_based: tuple[int, ...]
+    gate_min_acceptable_prob: float
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "AIGConfig | None":
+        if not args.aig or args.aig_alpha <= 0:
+            return None
+        return cls(
+            alpha=float(args.aig_alpha),
+            levels_zero_based=tuple(int(level) - 1 for level in args.aig_levels),
+            gate_min_acceptable_prob=float(args.aig_gate_min_acceptable_prob),
+        )
+
+    def applies_to(self, level: int) -> bool:
+        return int(level) in self.levels_zero_based
+
+
+def apply_aig_bias(
+    relevance_logits: torch.Tensor,
+    acceptable_logits: torch.Tensor,
+    imminent_logits: torch.Tensor,
+    alpha: float,
+    gate_min_acceptable_prob: float,
+) -> torch.Tensor:
+    log_p_a = F.log_softmax(acceptable_logits, dim=-1)
+    log_p_i = F.log_softmax(imminent_logits, dim=-1)
+    gap = log_p_a - log_p_i
+    if gate_min_acceptable_prob > 0:
+        gate = (log_p_a.exp() >= gate_min_acceptable_prob).to(relevance_logits.dtype)
+        gap = gap * gate
+    return relevance_logits + float(alpha) * gap
+
+
+def load_pseudo_ser_labels(path: Path | None) -> set[int] | None:
+    """Load mined pseudo-ser positive item ids for ser-target metrics."""
+
+    if path is None:
+        return None
+    if not path.exists():
+        raise FileNotFoundError(f"Pseudo-ser label file not found: {path}")
+
+    import pandas as pd
+
+    if path.suffix == ".parquet":
+        frame = pd.read_parquet(path)
+    elif path.suffix == ".csv":
+        frame = pd.read_csv(path)
+    else:
+        raise ValueError("Pseudo-ser labels must be stored as .parquet or .csv")
+    if "item_id" not in frame.columns:
+        raise ValueError("Pseudo-ser label file must contain an item_id column")
+    if "label" in frame.columns:
+        frame = frame[frame["label"].astype(int) == 1]
+    return {int(item_id) for item_id in frame["item_id"].tolist()}
 
 
 def rank_items(
@@ -561,11 +734,11 @@ def rank_items(
     return ranked
 
 
-def new_totals(ks: list[int]) -> dict[str, float]:
+def new_totals(ks: list[int], prefix: str = "") -> dict[str, float]:
     totals: dict[str, float] = {}
     for k in ks:
-        totals[f"hr@{k}"] = 0.0
-        totals[f"ndcg@{k}"] = 0.0
+        totals[f"hr{prefix}@{k}"] = 0.0
+        totals[f"ndcg{prefix}@{k}"] = 0.0
     return totals
 
 
@@ -574,6 +747,7 @@ def update_totals(
     ranked: list[int],
     target: int,
     ks: list[int],
+    prefix: str = "",
 ) -> None:
     for k in ks:
         topk = ranked[:k]
@@ -581,21 +755,22 @@ def update_totals(
             rank = topk.index(target)
         except ValueError:
             continue
-        totals[f"hr@{k}"] += 1.0
-        totals[f"ndcg@{k}"] += 1.0 / math.log2(rank + 2)
+        totals[f"hr{prefix}@{k}"] += 1.0
+        totals[f"ndcg{prefix}@{k}"] += 1.0 / math.log2(rank + 2)
 
 
 def finalize_totals(
     totals: dict[str, float],
     count: int,
     ks: list[int],
+    prefix: str = "",
 ) -> dict[str, float]:
     if count <= 0:
         return {key: 0.0 for key in totals}
     finalized = {}
     for k in ks:
-        finalized[f"hr@{k}"] = totals[f"hr@{k}"] / count
-        finalized[f"ndcg@{k}"] = totals[f"ndcg@{k}"] / count
+        finalized[f"hr{prefix}@{k}"] = totals[f"hr{prefix}@{k}"] / count
+        finalized[f"ndcg{prefix}@{k}"] = totals[f"ndcg{prefix}@{k}"] / count
     return finalized
 
 

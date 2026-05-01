@@ -6,6 +6,8 @@ defaults:
 
 tags: ["ama_mv", "serenfree", "stage2", "dual_horizon", "full_sid"]
 
+init_from_checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage1/epoch_017.ckpt
+
 model:
   lambda_i: 0.2
   lambda_a: 0.2

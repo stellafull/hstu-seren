@@ -50,6 +50,8 @@ class HSTUSerenFreeStage1(L.LightningModule):
         lambda_d: float = 1.0,
         lambda_i: float = 0.0,
         lambda_a: float = 0.0,
+        lambda_g: float = 0.0,
+        pseudo_ser_path: str | None = None,
         acceptable_window: int = 20,
         recent_window: int = 10,
         compile_model: bool = False,
@@ -67,10 +69,13 @@ class HSTUSerenFreeStage1(L.LightningModule):
         self.lambda_d = float(lambda_d)
         self.lambda_i = float(lambda_i)
         self.lambda_a = float(lambda_a)
+        self.lambda_g = float(lambda_g)
         self.acceptable_window = int(acceptable_window)
         self.recent_window = int(recent_window)
         self.compile_model = bool(compile_model)
         self._compiled = False
+        pseudo_ser_items = self._load_pseudo_ser_items(pseudo_ser_path)
+        self.register_buffer("pseudo_ser_items", pseudo_ser_items)
 
         sid_lookup = (
             self._load_prebuilt_sid_lookup(sid_lookup_path)
@@ -179,9 +184,14 @@ class HSTUSerenFreeStage1(L.LightningModule):
             valid_mask=valid_mask,
             past_payloads={TIMESTAMPS_KEY: timestamps},
         )
-        recent_context = self._last_valid_state(encoded, lengths)
+        relevance_context = self._last_valid_state(encoded, lengths)
+        recent_context = self._masked_recent_mean(encoded, lengths, self.recent_window)
         history_context = self._masked_history_mean(encoded, lengths)
-        decoded = self.decoder(recent_context, target_sid[:, :-1], mode=DecoderMode.RELEVANCE)
+        decoded = self.decoder(
+            relevance_context,
+            target_sid[:, :-1],
+            mode=DecoderMode.RELEVANCE,
+        )
         loss = relevance_loss(decoded, target_sid, lambda_d=self.lambda_d)
         metrics = self._prefix_metrics(decoded.as_list(), target_sid)
 
@@ -211,10 +221,17 @@ class HSTUSerenFreeStage1(L.LightningModule):
             loss = loss + self.lambda_a * acceptable_loss
             metrics["acceptable_loss"] = acceptable_loss.detach()
             if imminent is not None:
-                metrics["js_pa_pi"] = semantic_js_divergence(
-                    acceptable,
-                    imminent,
-                ).detach()
+                js = semantic_js_divergence(acceptable, imminent)
+                metrics["js_pa_pi"] = js.detach()
+                gap_loss = self._gap_loss(
+                    acceptable=acceptable,
+                    imminent=imminent,
+                    target_sid=target_sid,
+                    target_ids=target_ids,
+                )
+                if gap_loss is not None and self.lambda_g > 0:
+                    loss = loss + self.lambda_g * gap_loss
+                    metrics["gap_loss"] = gap_loss.detach()
         return loss, metrics
 
     def _item_ids_to_sid(self, item_ids: torch.Tensor) -> torch.Tensor:
@@ -250,6 +267,21 @@ class HSTUSerenFreeStage1(L.LightningModule):
         seq_len = encoded.size(1)
         positions = torch.arange(seq_len, device=encoded.device).unsqueeze(0)
         mask = positions < lengths.to(torch.long).unsqueeze(1)
+        weights = mask.to(encoded.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return (encoded * weights).sum(dim=1) / denom
+
+    def _masked_recent_mean(
+        self,
+        encoded: torch.Tensor,
+        lengths: torch.Tensor,
+        recent_window: int,
+    ) -> torch.Tensor:
+        seq_len = encoded.size(1)
+        lengths = lengths.to(torch.long).clamp(min=1, max=seq_len)
+        positions = torch.arange(seq_len, device=encoded.device).unsqueeze(0)
+        starts = (lengths - max(int(recent_window), 1)).clamp_min(0).unsqueeze(1)
+        mask = (positions >= starts) & (positions < lengths.unsqueeze(1))
         weights = mask.to(encoded.dtype).unsqueeze(-1)
         denom = weights.sum(dim=1).clamp_min(1.0)
         return (encoded * weights).sum(dim=1) / denom
@@ -308,6 +340,32 @@ class HSTUSerenFreeStage1(L.LightningModule):
         else:
             metrics["full_sid_acc"] = target_sid.new_tensor(0.0, dtype=torch.float32)
         return metrics
+
+    def _gap_loss(
+        self,
+        acceptable,
+        imminent,
+        target_sid: torch.Tensor,
+        target_ids: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.pseudo_ser_items.numel() == 0:
+            return None
+        positive = torch.isin(target_ids.to(torch.long), self.pseudo_ser_items)
+        if not positive.any():
+            return None
+        gaps = []
+        for level, target in enumerate(target_sid[:, :-1].unbind(dim=-1)):
+            log_p_a = torch.nn.functional.log_softmax(
+                acceptable.semantic_logits[level],
+                dim=-1,
+            )
+            log_p_i = torch.nn.functional.log_softmax(
+                imminent.semantic_logits[level],
+                dim=-1,
+            )
+            gaps.append((log_p_a - log_p_i).gather(1, target.unsqueeze(1)).squeeze(1))
+        mean_gap = torch.stack(gaps, dim=1).mean(dim=1)
+        return -mean_gap[positive].mean()
 
     def _init_sequence_encoder(
         self,
@@ -416,6 +474,24 @@ class HSTUSerenFreeStage1(L.LightningModule):
             tuple(lookup.shape),
         )
         return lookup
+
+    def _load_pseudo_ser_items(self, pseudo_ser_path: str | None) -> torch.Tensor:
+        if pseudo_ser_path is None:
+            return torch.empty(0, dtype=torch.long)
+        import pandas as pd
+
+        path = Path(pseudo_ser_path)
+        if path.suffix == ".parquet":
+            frame = pd.read_parquet(path)
+        elif path.suffix == ".csv":
+            frame = pd.read_csv(path)
+        else:
+            raise ValueError("pseudo_ser_path must be .parquet or .csv")
+        if "item_id" not in frame.columns:
+            raise ValueError("pseudo-ser file must contain an item_id column")
+        if "label" in frame.columns:
+            frame = frame[frame["label"].astype(int) == 1]
+        return torch.tensor(frame["item_id"].astype(int).tolist(), dtype=torch.long)
 
     def _read_item_lookup(
         self, item_lookup_path: str | None, lookup_is_zero_based: bool

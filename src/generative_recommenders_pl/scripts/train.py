@@ -56,6 +56,21 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     model: L.LightningModule = hydra.utils.instantiate(
         cfg.model, datamodule=datamodule, _recursive_=False
     )
+    init_from_checkpoint = cfg.get("init_from_checkpoint")
+    if init_from_checkpoint:
+        log.info(f"Initializing model weights from <{init_from_checkpoint}>")
+        checkpoint = torch.load(
+            init_from_checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
+        missing, unexpected = model.load_state_dict(checkpoint["state_dict"], strict=False)
+        if missing or unexpected:
+            log.info(
+                "Non-strict checkpoint init completed with missing=%s unexpected=%s",
+                missing,
+                unexpected,
+            )
 
     log.info("Instantiating callbacks...")
     callbacks: list[L.Callback] = instantiate_callbacks(cfg.get("callbacks"))
