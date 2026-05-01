@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,22 +22,23 @@ import torch.nn.functional as F
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from generative_recommenders_pl.models.serenfree import DecoderMode, SIDBeam, SIDTrie
+from generative_recommenders_pl.models.serenfree import DecoderMode, SIDBeam
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--experiment", default="serenfree_stage1_amazon_movies")
     parser.add_argument("--config-name", default="train.yaml")
-    parser.add_argument("--split", choices=("train", "val", "test"), default="test")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--beam-size", type=int, default=400)
-    parser.add_argument("--ks", type=int, nargs="+", default=[10, 50, 100, 200])
+    parser.add_argument("--split", choices=("train", "val", "test"), default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--beam-size", type=int, default=None)
+    parser.add_argument("--ks", type=int, nargs="+", default=None)
     parser.add_argument("--max-batches", type=int, default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--no-filter-history", action="store_true")
     parser.add_argument("--allow-duplicate-sids", action="store_true")
+    parser.add_argument("--progress-every", type=int, default=None)
     parser.add_argument(
         "--override",
         action="append",
@@ -47,11 +50,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    cfg = load_config(args)
+    apply_eval_config(args, cfg)
     ks = sorted(set(args.ks))
     if ks[-1] > args.beam_size:
         raise ValueError("beam-size must be at least the largest requested K")
 
-    cfg = load_config(args)
     datamodule = hydra.utils.instantiate(cfg.data, _recursive_=False)
     model = hydra.utils.instantiate(cfg.model, datamodule=datamodule, _recursive_=False)
     # Lightning checkpoints include OmegaConf metadata; this is a locally
@@ -78,7 +82,7 @@ def main() -> None:
         "test": datamodule.test_dataloader,
     }[args.split]()
 
-    trie, trie_audit = build_trie_from_sid_lookup(
+    sid_index, trie_audit = build_sid_transition_index(
         model.sid_lookup.detach().cpu(),
         allow_duplicate_sids=args.allow_duplicate_sids,
     )
@@ -86,12 +90,13 @@ def main() -> None:
     metrics = evaluate(
         model=model,
         dataloader=dataloader,
-        trie=trie,
+        sid_index=sid_index,
         ks=ks,
         beam_size=args.beam_size,
         device=device,
-        filter_history=not args.no_filter_history,
+        filter_history=args.filter_history,
         max_batches=args.max_batches,
+        progress_every=args.progress_every,
     )
     output = {"audit": audit, "metrics": metrics}
     print(json.dumps(output, indent=2, sort_keys=True), flush=True)
@@ -108,10 +113,75 @@ def load_config(args: argparse.Namespace) -> Any:
         return compose(config_name=args.config_name, overrides=overrides)
 
 
-def build_trie_from_sid_lookup(
+def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
+    eval_cfg = cfg.get("serenfree_eval", None)
+    eval_cfg = (
+        OmegaConf.to_container(eval_cfg, resolve=True)
+        if eval_cfg is not None
+        else {}
+    )
+
+    def configured(name: str, default: Any) -> Any:
+        return eval_cfg.get(name, default)
+
+    if args.checkpoint is None:
+        checkpoint = configured("checkpoint", None)
+        if checkpoint is None:
+            raise ValueError(
+                "Evaluation checkpoint is required; pass --checkpoint or set "
+                "serenfree_eval.checkpoint in the experiment YAML."
+            )
+        args.checkpoint = Path(str(checkpoint))
+    if args.split is None:
+        args.split = str(configured("split", "test"))
+    if args.device is None:
+        args.device = str(
+            configured("device", "cuda" if torch.cuda.is_available() else "cpu")
+        )
+    if args.beam_size is None:
+        args.beam_size = int(configured("beam_size", 400))
+    if args.ks is None:
+        args.ks = [int(k) for k in configured("ks", [10, 50, 100, 200])]
+    if args.max_batches is None:
+        max_batches = configured("max_batches", None)
+        args.max_batches = None if max_batches is None else int(max_batches)
+    if args.output_json is None:
+        output_json = configured("output_json", None)
+        args.output_json = None if output_json is None else Path(str(output_json))
+    args.filter_history = (
+        False if args.no_filter_history else bool(configured("filter_history", True))
+    )
+    args.allow_duplicate_sids = bool(
+        args.allow_duplicate_sids or configured("allow_duplicate_sids", False)
+    )
+    if args.progress_every is None:
+        args.progress_every = int(configured("progress_every", 10))
+
+
+@dataclass(frozen=True)
+class SIDTransitionIndex:
+    """Dense transition tables for valid full-SID constrained decoding."""
+
+    num_sid_columns: int
+    child_tokens: list[torch.Tensor]
+    child_next_nodes: list[torch.Tensor]
+    child_item_ids: list[torch.Tensor]
+    child_valid: list[torch.Tensor]
+
+    def to(self, device: torch.device) -> "SIDTransitionIndex":
+        return SIDTransitionIndex(
+            num_sid_columns=self.num_sid_columns,
+            child_tokens=[tensor.to(device) for tensor in self.child_tokens],
+            child_next_nodes=[tensor.to(device) for tensor in self.child_next_nodes],
+            child_item_ids=[tensor.to(device) for tensor in self.child_item_ids],
+            child_valid=[tensor.to(device) for tensor in self.child_valid],
+        )
+
+
+def build_sid_transition_index(
     sid_lookup: torch.Tensor,
     allow_duplicate_sids: bool,
-) -> tuple[SIDTrie, dict[str, Any]]:
+) -> tuple[SIDTransitionIndex, dict[str, Any]]:
     if sid_lookup.dim() != 2 or sid_lookup.size(1) < 2:
         raise ValueError("sid_lookup must have shape [items, semantic levels + dedup]")
     valid = (sid_lookup != 0).all(dim=1)
@@ -127,7 +197,7 @@ def build_trie_from_sid_lookup(
             "if duplicate handling is intentional."
         )
 
-    trie = SIDTrie.from_items(item_ids=item_ids, sid_tokens=sid_tokens)
+    sid_index = build_transition_tables(item_ids=item_ids, sid_tokens=sid_tokens)
     audit = {
         "candidate_items": int(item_ids.numel()),
         "duplicate_full_sid_count": int(duplicate_count),
@@ -141,7 +211,81 @@ def build_trie_from_sid_lookup(
             for idx in range(sid_lookup.size(1))
         ],
     }
-    return trie, audit
+    return sid_index, audit
+
+
+def build_transition_tables(
+    item_ids: torch.Tensor,
+    sid_tokens: torch.Tensor,
+) -> SIDTransitionIndex:
+    num_sid_columns = int(sid_tokens.size(1))
+    prefix_to_node: list[dict[tuple[int, ...], int]] = [
+        {} for _ in range(num_sid_columns)
+    ]
+    prefix_to_node[0][()] = 0
+    children_by_level: list[dict[int, dict[int, tuple[int, int]]]] = [
+        defaultdict(dict) for _ in range(num_sid_columns)
+    ]
+
+    seen_full_sids: set[tuple[int, ...]] = set()
+    for item_id, sid_row in zip(item_ids.tolist(), sid_tokens.tolist()):
+        sid = tuple(int(token) for token in sid_row)
+        if sid in seen_full_sids:
+            continue
+        seen_full_sids.add(sid)
+
+        prefix: tuple[int, ...] = ()
+        node = 0
+        for level, token in enumerate(sid):
+            if level < num_sid_columns - 1:
+                next_prefix = (*prefix, token)
+                next_node = prefix_to_node[level + 1].setdefault(
+                    next_prefix,
+                    len(prefix_to_node[level + 1]),
+                )
+                children_by_level[level][node][token] = (next_node, -1)
+                prefix = next_prefix
+                node = next_node
+            else:
+                children_by_level[level][node][token] = (-1, int(item_id))
+
+    child_tokens: list[torch.Tensor] = []
+    child_next_nodes: list[torch.Tensor] = []
+    child_item_ids: list[torch.Tensor] = []
+    child_valid: list[torch.Tensor] = []
+    for level in range(num_sid_columns):
+        num_nodes = len(prefix_to_node[level])
+        max_children = max(
+            (len(children_by_level[level].get(node, {})) for node in range(num_nodes)),
+            default=0,
+        )
+        if max_children <= 0:
+            raise ValueError(f"SID transition level {level} has no children")
+
+        tokens = torch.zeros((num_nodes, max_children), dtype=torch.long)
+        next_nodes = torch.zeros((num_nodes, max_children), dtype=torch.long)
+        item_tensor = torch.full((num_nodes, max_children), -1, dtype=torch.long)
+        valid = torch.zeros((num_nodes, max_children), dtype=torch.bool)
+        for node in range(num_nodes):
+            children = sorted(children_by_level[level].get(node, {}).items())
+            for col, (token, (next_node, item_id)) in enumerate(children):
+                tokens[node, col] = int(token)
+                next_nodes[node, col] = max(int(next_node), 0)
+                item_tensor[node, col] = int(item_id)
+                valid[node, col] = True
+
+        child_tokens.append(tokens)
+        child_next_nodes.append(next_nodes)
+        child_item_ids.append(item_tensor)
+        child_valid.append(valid)
+
+    return SIDTransitionIndex(
+        num_sid_columns=num_sid_columns,
+        child_tokens=child_tokens,
+        child_next_nodes=child_next_nodes,
+        child_item_ids=child_item_ids,
+        child_valid=child_valid,
+    )
 
 
 def audit_pipeline(
@@ -154,7 +298,7 @@ def audit_pipeline(
         "checkpoint": str(args.checkpoint),
         "experiment": args.experiment,
         "split": args.split,
-        "filter_history": not args.no_filter_history,
+        "filter_history": bool(args.filter_history),
         "beam_size": int(args.beam_size),
         "ks": args.ks,
         "model_class": type(model).__name__,
@@ -174,16 +318,20 @@ def audit_pipeline(
 def evaluate(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
-    trie: SIDTrie,
+    sid_index: SIDTransitionIndex,
     ks: list[int],
     beam_size: int,
     device: torch.device,
     filter_history: bool,
     max_batches: int | None,
+    progress_every: int,
 ) -> dict[str, Any]:
+    sid_index = sid_index.to(device)
     totals = {"all": new_totals(ks), "eligible": new_totals(ks)}
     counts = defaultdict(int)
     max_k = max(ks)
+    started_at = time.monotonic()
+    total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
 
     for batch_idx, batch in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -192,7 +340,7 @@ def evaluate(
         beams_by_row = batched_constrained_beam_search(
             decoder=model.decoder,
             context=context,
-            trie=trie,
+            sid_index=sid_index,
             beam_size=beam_size,
         )
 
@@ -224,6 +372,20 @@ def evaluate(
                 counts["eligible"] += 1
             else:
                 counts["unmapped_target"] += 1
+
+        if progress_every > 0 and (batch_idx + 1) % progress_every == 0:
+            elapsed = time.monotonic() - started_at
+            seen_batches = batch_idx + 1
+            progress = {
+                "progress": {
+                    "batch": seen_batches,
+                    "batches": total_batches,
+                    "examples": counts["all"],
+                    "elapsed_sec": round(elapsed, 2),
+                    "examples_per_sec": round(counts["all"] / max(elapsed, 1e-9), 2),
+                }
+            }
+            print(json.dumps(progress, sort_keys=True), flush=True)
 
     return {
         "counts": dict(counts),
@@ -263,87 +425,120 @@ def encode_context(
 def batched_constrained_beam_search(
     decoder: torch.nn.Module,
     context: torch.Tensor,
-    trie: SIDTrie,
+    sid_index: SIDTransitionIndex,
     beam_size: int,
 ) -> list[list[SIDBeam]]:
-    if trie.num_sid_columns is None:
-        raise ValueError("Cannot decode with an empty SID trie")
-    rows: list[list[tuple[tuple[int, ...], float]]] = [[((), 0.0)] for _ in range(context.size(0))]
+    batch_size = int(context.size(0))
+    semantic_levels = int(decoder.num_semantic_levels)
+    scores = context.new_zeros((batch_size, 1))
+    node_ids = torch.zeros((batch_size, 1), dtype=torch.long, device=context.device)
+    prefix_tokens = torch.zeros(
+        (batch_size, 1, semantic_levels),
+        dtype=torch.long,
+        device=context.device,
+    )
+    sid_tokens = torch.zeros(
+        (batch_size, 1, sid_index.num_sid_columns),
+        dtype=torch.long,
+        device=context.device,
+    )
+    item_ids = torch.full((batch_size, 1), -1, dtype=torch.long, device=context.device)
 
-    for level in range(trie.num_sid_columns):
-        flat_rows: list[int] = []
-        flat_prefixes: list[tuple[int, ...]] = []
-        flat_scores: list[float] = []
-        for row_idx, row_beams in enumerate(rows):
-            for prefix, score in row_beams:
-                flat_rows.append(row_idx)
-                flat_prefixes.append(prefix)
-                flat_scores.append(score)
-        if not flat_rows:
-            break
-
-        row_index = torch.tensor(flat_rows, dtype=torch.long, device=context.device)
-        prefix_tensor = prefix_tensor_from_prefixes(
-            prefixes=flat_prefixes,
-            num_semantic_levels=decoder.num_semantic_levels,
-            device=context.device,
+    for level in range(sid_index.num_sid_columns):
+        beam_count = int(scores.size(1))
+        logits = decoder_level_logits(
+            decoder=decoder,
+            context=context.unsqueeze(1).expand(-1, beam_count, -1),
+            prefix_tokens=prefix_tokens,
+            level=level,
         )
-        logits = decoder(
-            context.index_select(dim=0, index=row_index),
-            prefix_tensor,
-            mode=DecoderMode.RELEVANCE,
-        ).as_list()[level]
         log_probs = F.log_softmax(logits, dim=-1)
 
-        expanded_by_row: list[list[tuple[tuple[int, ...], float]]] = [
-            [] for _ in range(context.size(0))
-        ]
-        for beam_idx, prefix in enumerate(flat_prefixes):
-            allowed = trie.allowed_tokens(prefix)
-            if not allowed:
-                continue
-            allowed_tensor = torch.tensor(allowed, dtype=torch.long, device=context.device)
-            allowed_scores = log_probs[beam_idx].index_select(0, allowed_tensor).cpu()
-            row_idx = flat_rows[beam_idx]
-            base_score = flat_scores[beam_idx]
-            for token, score in zip(allowed, allowed_scores.tolist()):
-                expanded_by_row[row_idx].append(((*prefix, int(token)), base_score + float(score)))
+        flat_nodes = node_ids.reshape(-1)
+        child_tokens = sid_index.child_tokens[level].index_select(0, flat_nodes)
+        child_next_nodes = sid_index.child_next_nodes[level].index_select(0, flat_nodes)
+        child_item_ids = sid_index.child_item_ids[level].index_select(0, flat_nodes)
+        child_valid = sid_index.child_valid[level].index_select(0, flat_nodes)
 
-        rows = [
-            sorted(row_expanded, key=lambda candidate: candidate[1], reverse=True)[:beam_size]
-            for row_expanded in expanded_by_row
-        ]
+        child_count = int(child_tokens.size(1))
+        child_tokens = child_tokens.view(batch_size, beam_count, child_count)
+        child_next_nodes = child_next_nodes.view(batch_size, beam_count, child_count)
+        child_item_ids = child_item_ids.view(batch_size, beam_count, child_count)
+        child_valid = child_valid.view(batch_size, beam_count, child_count)
 
+        child_scores = log_probs.gather(dim=-1, index=child_tokens)
+        candidate_scores = (scores.unsqueeze(-1) + child_scores).masked_fill(
+            ~child_valid,
+            -torch.inf,
+        )
+        flat_scores = candidate_scores.reshape(batch_size, -1)
+        top_count = min(int(beam_size), int(flat_scores.size(1)))
+        top_scores, top_pos = flat_scores.topk(top_count, dim=-1)
+        finite = torch.isfinite(top_scores)
+        parent_idx = torch.div(top_pos, child_count, rounding_mode="floor")
+        selected_tokens = child_tokens.reshape(batch_size, -1).gather(1, top_pos)
+        selected_next_nodes = child_next_nodes.reshape(batch_size, -1).gather(1, top_pos)
+        selected_item_ids = child_item_ids.reshape(batch_size, -1).gather(1, top_pos)
+        selected_tokens = selected_tokens.masked_fill(~finite, 0)
+        selected_next_nodes = selected_next_nodes.masked_fill(~finite, 0)
+        selected_item_ids = selected_item_ids.masked_fill(~finite, -1)
+
+        sid_tokens = sid_tokens.gather(
+            dim=1,
+            index=parent_idx.unsqueeze(-1).expand(-1, -1, sid_index.num_sid_columns),
+        )
+        sid_tokens[:, :, level] = selected_tokens
+        if level < semantic_levels:
+            prefix_tokens = prefix_tokens.gather(
+                dim=1,
+                index=parent_idx.unsqueeze(-1).expand(-1, -1, semantic_levels),
+            )
+            prefix_tokens[:, :, level] = selected_tokens
+        if level < sid_index.num_sid_columns - 1:
+            node_ids = selected_next_nodes
+        else:
+            item_ids = selected_item_ids
+        scores = top_scores
+
+    scores_cpu = scores.detach().cpu()
+    item_ids_cpu = item_ids.detach().cpu()
+    sid_tokens_cpu = sid_tokens.detach().cpu()
     results: list[list[SIDBeam]] = []
-    for row_beams in rows:
-        row_results = []
-        for sid, score in row_beams:
-            item_id = trie.item_id(sid)
-            if item_id is not None:
-                row_results.append(SIDBeam(item_id=item_id, sid=sid, score=score))
+    for row_idx in range(batch_size):
+        row_results: list[SIDBeam] = []
+        for beam_idx in range(item_ids_cpu.size(1)):
+            item_id = int(item_ids_cpu[row_idx, beam_idx].item())
+            score = float(scores_cpu[row_idx, beam_idx].item())
+            if item_id < 0 or not math.isfinite(score):
+                continue
+            sid = tuple(int(token) for token in sid_tokens_cpu[row_idx, beam_idx].tolist())
+            row_results.append(SIDBeam(item_id=item_id, sid=sid, score=score))
         results.append(row_results)
     return results
 
 
-def prefix_tensor_from_prefixes(
-    prefixes: list[tuple[int, ...]],
-    num_semantic_levels: int,
-    device: torch.device,
+def decoder_level_logits(
+    decoder: torch.nn.Module,
+    context: torch.Tensor,
+    prefix_tokens: torch.Tensor,
+    level: int,
 ) -> torch.Tensor:
-    tokens = torch.zeros(
-        (len(prefixes), num_semantic_levels),
+    shape = context.shape[:-1]
+    mode_ids = torch.full(
+        shape,
+        int(DecoderMode.RELEVANCE),
         dtype=torch.long,
-        device=device,
+        device=context.device,
     )
-    for row_idx, prefix in enumerate(prefixes):
-        usable = prefix[:num_semantic_levels]
-        if usable:
-            tokens[row_idx, : len(usable)] = torch.tensor(
-                usable,
-                dtype=torch.long,
-                device=device,
-            )
-    return tokens
+    mode_emb = decoder.mode_embedding(mode_ids)
+    empty_prefix = torch.zeros(
+        (*shape, decoder.prefix_dim),
+        dtype=context.dtype,
+        device=context.device,
+    )
+    prefix_parts = decoder._prefix_parts(prefix_tokens, level, empty_prefix)
+    state = decoder._state(context, mode_emb, level, prefix_parts)
+    return decoder.heads[level](state)
 
 
 def rank_items(
