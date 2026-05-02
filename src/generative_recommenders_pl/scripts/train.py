@@ -1,51 +1,84 @@
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import hydra
-import lightning as L
-import torch
-import torch.multiprocessing
-
-torch.backends.cuda.matmul.allow_tf32 = True if torch.cuda.is_available() else False
-torch.backends.cudnn.allow_tf32 = True
-from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from generative_recommenders_pl.utils.instantiators import (
-    get_metric_value,
-    instantiate_callbacks,
-    instantiate_loggers,
-)
-from generative_recommenders_pl.utils.logger import RankedLogger
+if TYPE_CHECKING:
+    import lightning as L
+    import torch
+    from lightning.pytorch.loggers import Logger
 
-log = RankedLogger(__name__)
+
+_RUNTIME = None
+log = None
+
 
 OmegaConf.register_new_resolver("eval", eval)
-torch.multiprocessing.set_sharing_strategy("file_system")
+
+
+def _runtime_imports():
+    global _RUNTIME, log
+    if _RUNTIME is None:
+        import lightning as L
+        import torch
+        import torch.multiprocessing
+        from lightning.pytorch.loggers import Logger
+
+        from generative_recommenders_pl.utils.instantiators import (
+            get_metric_value,
+            instantiate_callbacks,
+            instantiate_loggers,
+        )
+        from generative_recommenders_pl.utils.logger import RankedLogger
+
+        torch.backends.cuda.matmul.allow_tf32 = True if torch.cuda.is_available() else False
+        torch.backends.cudnn.allow_tf32 = True
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
+        log = RankedLogger(__name__)
+        _RUNTIME = {
+            "L": L,
+            "torch": torch,
+            "Logger": Logger,
+            "get_metric_value": get_metric_value,
+            "instantiate_callbacks": instantiate_callbacks,
+            "instantiate_loggers": instantiate_loggers,
+        }
+    return _RUNTIME
+
+
+def enforce_label_free_config(cfg: DictConfig) -> None:
+    label_free = cfg.get("label_free")
+    if not label_free:
+        return
+    if bool(label_free.get("forbid_ser_labels_in_train", False)):
+        pseudo_path = cfg.get("model", {}).get("pseudo_ser_path") if cfg.get("model") else None
+        if pseudo_path not in {None, "", "null"}:
+            raise ValueError("label_free forbids pseudo_ser_path / ser-label-derived training inputs")
+    if bool(label_free.get("forbid_ser_labels_in_early_stop", False)):
+        monitor = cfg.get("callbacks", {}).get("early_stopping", {}).get("monitor") if cfg.get("callbacks") else None
+        if monitor and "ser" in str(monitor).lower():
+            raise ValueError("label_free forbids ser-label early stopping monitors")
+    if bool(label_free.get("forbid_ser_labels_in_hparam_selection", False)):
+        metric = cfg.get("optimized_metric")
+        if metric and "ser" in str(metric).lower():
+            raise ValueError("label_free forbids ser-label hyperparameter selection metrics")
 
 
 def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
-    training.
+    runtime = _runtime_imports()
+    L = runtime["L"]
+    torch = runtime["torch"]
+    instantiate_callbacks = runtime["instantiate_callbacks"]
+    instantiate_loggers = runtime["instantiate_loggers"]
 
-    This method is wrapped in optional @task_wrapper decorator, that controls the behavior during
-    failure. Useful for multiruns, saving info about the crash, etc.
+    enforce_label_free_config(cfg)
 
-    Args:
-        cfg: DictConfig configuration composed by Hydra.
-
-    Returns:
-        A tuple with metrics and dict with all instantiated objects.
-    """
-    # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
-    # log.info(f"config: {OmegaConf.to_yaml(cfg)}")
-
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
-    datamodule: L.LightningDataModule = hydra.utils.instantiate(
-        cfg.data, _recursive_=False
-    )
+    datamodule = hydra.utils.instantiate(cfg.data, _recursive_=False)
 
     max_item_id = getattr(datamodule, "max_item_id", None)
     if max_item_id is not None and cfg.get("model") and cfg.model.get("embeddings"):
@@ -53,9 +86,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             cfg.model.embeddings.num_items = int(max_item_id)
 
     log.info(f"Instantiating model <{cfg.model._target_}>")
-    model: L.LightningModule = hydra.utils.instantiate(
-        cfg.model, datamodule=datamodule, _recursive_=False
-    )
+    model = hydra.utils.instantiate(cfg.model, datamodule=datamodule, _recursive_=False)
     init_from_checkpoint = cfg.get("init_from_checkpoint")
     if init_from_checkpoint:
         log.info(f"Initializing model weights from <{init_from_checkpoint}>")
@@ -78,15 +109,13 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             )
 
     log.info("Instantiating callbacks...")
-    callbacks: list[L.Callback] = instantiate_callbacks(cfg.get("callbacks"))
+    callbacks = instantiate_callbacks(cfg.get("callbacks"))
 
     log.info("Instantiating loggers...")
-    logger: list[Logger] = instantiate_loggers(cfg.get("logger"))
+    logger = instantiate_loggers(cfg.get("logger"))
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
-    trainer: L.Trainer = hydra.utils.instantiate(
-        cfg.trainer, callbacks=callbacks, logger=logger
-    )
+    trainer = hydra.utils.instantiate(cfg.trainer, callbacks=callbacks, logger=logger)
 
     object_dict = {
         "cfg": cfg,
@@ -113,10 +142,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         log.info(f"Best ckpt path: {ckpt_path}")
 
     test_metrics = trainer.callback_metrics
-
-    # merge train and test metrics
     metric_dict = {**train_metrics, **test_metrics}
-
     return metric_dict, object_dict
 
 
@@ -124,25 +150,11 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     version_base="1.3", config_path="../../../configs", config_name="train.yaml"
 )
 def main(cfg: DictConfig) -> Optional[float]:
-    """Main entry point for training.
-
-    Args:
-        cfg: DictConfig configuration composed by Hydra.
-
-    Returns:
-        Optional[float] with optimized metric value.
-    """
-    # apply extra utilities
-    # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
-    # train the model
     metric_dict, _ = train(cfg)
-
-    # safely retrieve metric value for hydra-based hyperparameter optimization
+    get_metric_value = _runtime_imports()["get_metric_value"]
     metric_value = get_metric_value(
         metric_dict=metric_dict, metric_name=cfg.get("optimized_metric")
     )
-
-    # return optimized metric
     return metric_value
 
 

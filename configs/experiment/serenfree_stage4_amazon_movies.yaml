@@ -27,7 +27,7 @@ serenfree_eval:
   checkpoint: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage4/last.ckpt
   aig: true
   aig_alpha: 0.5
-  aig_levels: [1, 2]
+  aig_levels: adaptive_semantic_non_dedup
   aig_gate_min_acceptable_prob: 0.0
   pseudo_ser_path: ${paths.root_dir}/tmp/serenfree/amazon_movies/pseudo_ser_train.parquet
   output_json: ${paths.root_dir}/logs/serenfree_stage4_amazon_movies/retrieval_eval_test.json

@@ -19,6 +19,7 @@ from generative_recommenders_pl.models.serenfree import (
     semantic_js_divergence,
     semantic_loss,
 )
+from generative_recommenders_pl.models.serenfree.losses import ai_collapse_diagnostics, lf_rank_loss, trie_marginal_nll
 from generative_recommenders_pl.models.sequential_encoders.hstu import HSTU, TIMESTAMPS_KEY
 from generative_recommenders_pl.models.utils.initialization import truncated_normal
 from generative_recommenders_pl.utils.logger import RankedLogger
@@ -54,6 +55,11 @@ class HSTUSerenFreeStage1(L.LightningModule):
         pseudo_ser_path: str | None = None,
         acceptable_window: int = 20,
         recent_window: int = 10,
+        future_target_loss: str = "legacy_history_proxy",
+        require_future_targets: bool = False,
+        lambda_rank: float = 0.0,
+        rank_temperature: float = 0.1,
+        stopgrad_R_in_rank: bool = True,
         compile_model: bool = False,
     ) -> None:
         super().__init__()
@@ -72,6 +78,11 @@ class HSTUSerenFreeStage1(L.LightningModule):
         self.lambda_g = float(lambda_g)
         self.acceptable_window = int(acceptable_window)
         self.recent_window = int(recent_window)
+        self.future_target_loss = str(future_target_loss)
+        self.require_future_targets = bool(require_future_targets)
+        self.lambda_rank = float(lambda_rank)
+        self.rank_temperature = float(rank_temperature)
+        self.stopgrad_R_in_rank = bool(stopgrad_R_in_rank)
         self.compile_model = bool(compile_model)
         self._compiled = False
         pseudo_ser_items = self._load_pseudo_ser_items(pseudo_ser_path)
@@ -195,44 +206,230 @@ class HSTUSerenFreeStage1(L.LightningModule):
         loss = relevance_loss(decoded, target_sid, lambda_d=self.lambda_d)
         metrics = self._prefix_metrics(decoded.as_list(), target_sid)
 
+        imminent = None
+        acceptable = None
         if self.lambda_i > 0:
             imminent = self.decoder(
                 recent_context,
                 target_sid[:, :-1],
                 mode=DecoderMode.IMMINENT,
             )
-            imminent_loss = semantic_loss(imminent, target_sid)
+            i_targets = self._batch_future_sid_targets(batch, ("I_sids", "future_i_sids", "imminent_sids"))
+            if self._uses_v2_future_targets():
+                if i_targets is None:
+                    raise RuntimeError(
+                        "Missing future-window I_sids for V2 imminent training; "
+                        "build them with tools/build_future_window_targets.py and use FutureWindowTargetDataset."
+                    )
+                imminent_loss = self._multi_positive_sid_loss(
+                    contexts=recent_context,
+                    target_sids=i_targets,
+                    mode=DecoderMode.IMMINENT,
+                )
+            else:
+                imminent_loss = semantic_loss(imminent, target_sid)
             loss = loss + self.lambda_i * imminent_loss
             metrics["imminent_loss"] = imminent_loss.detach()
-        else:
-            imminent = None
 
         if self.lambda_a > 0:
-            acceptable_targets = self._acceptable_semantic_targets(
-                historical_ids=historical_ids,
-                lengths=lengths,
-            )
-            acceptable = self.decoder(
-                history_context,
-                acceptable_targets,
-                mode=DecoderMode.ACCEPTABLE,
-            )
-            acceptable_loss = semantic_loss(acceptable, acceptable_targets)
+            a_targets = self._batch_future_sid_targets(batch, ("A_sids", "future_a_sids", "acceptable_sids"))
+            if self._uses_v2_future_targets():
+                if a_targets is None:
+                    raise RuntimeError(
+                        "Missing future-window A_sids for V2 acceptable training; "
+                        "the legacy history-window proxy is disabled for V2."
+                    )
+                acceptable_prefix = self._first_positive_prefix(a_targets)
+                acceptable = self.decoder(
+                    history_context,
+                    acceptable_prefix,
+                    mode=DecoderMode.ACCEPTABLE,
+                )
+                acceptable_loss = self._multi_positive_sid_loss(
+                    contexts=history_context,
+                    target_sids=a_targets,
+                    mode=DecoderMode.ACCEPTABLE,
+                )
+            else:
+                acceptable_targets = self._acceptable_semantic_targets(
+                    historical_ids=historical_ids,
+                    lengths=lengths,
+                )
+                acceptable = self.decoder(
+                    history_context,
+                    acceptable_targets,
+                    mode=DecoderMode.ACCEPTABLE,
+                )
+                acceptable_loss = semantic_loss(acceptable, acceptable_targets)
             loss = loss + self.lambda_a * acceptable_loss
             metrics["acceptable_loss"] = acceptable_loss.detach()
-            if imminent is not None:
+            if imminent is not None and acceptable is not None:
+                for key, value in ai_collapse_diagnostics(
+                    acceptable.semantic_logits,
+                    imminent.semantic_logits,
+                    target_a=a_targets[:, 0, :-1] if a_targets is not None and a_targets.numel() else None,
+                    target_i=i_targets[:, 0, :-1] if 'i_targets' in locals() and i_targets is not None and i_targets.numel() else None,
+                ).items():
+                    metrics[key] = value.detach()
                 js = semantic_js_divergence(acceptable, imminent)
                 metrics["js_pa_pi"] = js.detach()
-                gap_loss = self._gap_loss(
-                    acceptable=acceptable,
-                    imminent=imminent,
-                    target_sid=target_sid,
-                    target_ids=target_ids,
-                )
-                if gap_loss is not None and self.lambda_g > 0:
-                    loss = loss + self.lambda_g * gap_loss
-                    metrics["gap_loss"] = gap_loss.detach()
+                if not self._uses_v2_future_targets():
+                    gap_loss = self._gap_loss(
+                        acceptable=acceptable,
+                        imminent=imminent,
+                        target_sid=target_sid,
+                        target_ids=target_ids,
+                    )
+                    if gap_loss is not None and self.lambda_g > 0:
+                        loss = loss + self.lambda_g * gap_loss
+                        metrics["gap_loss"] = gap_loss.detach()
+
+        if self.lambda_rank > 0 and self._uses_v2_future_targets():
+            rank_loss = self._batch_lf_rank_loss(
+                batch,
+                relevance_context=relevance_context,
+                acceptable_context=history_context,
+                imminent_context=recent_context,
+            )
+            if rank_loss is not None:
+                loss = loss + self.lambda_rank * rank_loss
+                metrics["lf_rank_loss"] = rank_loss.detach()
         return loss, metrics
+
+
+    def _uses_v2_future_targets(self) -> bool:
+        return self.require_future_targets or self.future_target_loss in {"trie_marginal", "multi_positive"}
+
+    def _batch_future_sid_targets(
+        self,
+        batch: dict[str, Any],
+        names: tuple[str, ...],
+    ) -> torch.Tensor | None:
+        for name in names:
+            value = batch.get(name)
+            if value is None:
+                continue
+            if isinstance(value, torch.Tensor):
+                tensor = value.to(self.device, dtype=torch.long)
+            else:
+                tensor = torch.as_tensor(value, dtype=torch.long, device=self.device)
+            if tensor.dim() == 2:
+                tensor = tensor.unsqueeze(1)
+            if tensor.dim() != 3:
+                raise ValueError(f"{name} must have shape [B, N, SID_COLUMNS]")
+            if tensor.size(-1) == self.decoder.num_semantic_levels:
+                pad = torch.zeros((*tensor.shape[:-1], 1), dtype=tensor.dtype, device=tensor.device)
+                tensor = torch.cat([tensor, pad], dim=-1)
+            return tensor
+        return None
+
+    def _first_positive_prefix(self, target_sids: torch.Tensor) -> torch.Tensor:
+        valid = (target_sids != 0).any(dim=-1)
+        first_idx = valid.to(torch.long).argmax(dim=1)
+        rows = torch.arange(target_sids.size(0), device=target_sids.device)
+        return target_sids[rows, first_idx, : self.decoder.num_semantic_levels]
+
+    def _multi_positive_sid_loss(
+        self,
+        contexts: torch.Tensor,
+        target_sids: torch.Tensor,
+        mode: DecoderMode,
+    ) -> torch.Tensor:
+        semantic_levels = tuple(range(self.decoder.num_semantic_levels))
+        losses = []
+        for row_idx in range(target_sids.size(0)):
+            row_targets = target_sids[row_idx]
+            row_targets = row_targets[(row_targets[:, : self.decoder.num_semantic_levels] != 0).all(dim=1)]
+            if row_targets.numel() == 0:
+                losses.append(contexts[row_idx].sum() * 0.0)
+                continue
+
+            def logits_fn(prefix: tuple[int, ...], level: int) -> torch.Tensor:
+                prefix_tokens = torch.zeros(
+                    (1, self.decoder.num_semantic_levels),
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                if prefix:
+                    prefix_tokens[0, : len(prefix)] = torch.tensor(prefix, dtype=torch.long, device=self.device)
+                decoded = self.decoder(
+                    contexts[row_idx : row_idx + 1],
+                    prefix_tokens,
+                    mode=mode,
+                )
+                return decoded.level_logits[level][0]
+
+            losses.append(trie_marginal_nll(logits_fn, row_targets, semantic_levels))
+        return torch.stack(losses).mean()
+
+    def _batch_lf_rank_loss(
+        self,
+        batch: dict[str, Any],
+        relevance_context: torch.Tensor | None = None,
+        acceptable_context: torch.Tensor | None = None,
+        imminent_context: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if "rank_positive_mask" not in batch:
+            return None
+        positive_mask = batch["rank_positive_mask"].to(self.device).bool()
+        geometry = batch.get("rank_geometry")
+        geometry = (
+            geometry.to(self.device, dtype=torch.float32)
+            if isinstance(geometry, torch.Tensor)
+            else torch.zeros_like(positive_mask, dtype=torch.float32, device=self.device)
+        )
+        if all(name in batch for name in ("rank_s_R", "rank_s_A", "rank_s_I")):
+            return lf_rank_loss(
+                batch["rank_s_R"].to(self.device),
+                batch["rank_s_A"].to(self.device),
+                batch["rank_s_I"].to(self.device),
+                geometry,
+                positive_mask,
+                temperature=self.rank_temperature,
+                stopgrad_r=self.stopgrad_R_in_rank,
+            )
+        rank_sids = self._batch_future_sid_targets(batch, ("rank_candidate_sids", "rank_sids"))
+        if rank_sids is None:
+            return None
+        if relevance_context is None or acceptable_context is None or imminent_context is None:
+            raise RuntimeError("Missing mode-specific contexts for V2 LF-rank candidate scoring")
+        s_r = self._candidate_sid_scores(relevance_context, rank_sids, DecoderMode.RELEVANCE)
+        s_a = self._candidate_sid_scores(acceptable_context, rank_sids, DecoderMode.ACCEPTABLE)
+        s_i = self._candidate_sid_scores(imminent_context, rank_sids, DecoderMode.IMMINENT)
+        return lf_rank_loss(
+            s_r,
+            s_a,
+            s_i,
+            geometry,
+            positive_mask,
+            temperature=self.rank_temperature,
+            stopgrad_r=self.stopgrad_R_in_rank,
+        )
+
+    def _candidate_sid_scores(
+        self,
+        contexts: torch.Tensor,
+        target_sids: torch.Tensor,
+        mode: DecoderMode,
+    ) -> torch.Tensor:
+        batch_size, num_candidates, _ = target_sids.shape
+        flat_context = contexts.unsqueeze(1).expand(-1, num_candidates, -1).reshape(
+            batch_size * num_candidates,
+            contexts.size(-1),
+        )
+        flat_sids = target_sids.reshape(batch_size * num_candidates, target_sids.size(-1))
+        prefix = flat_sids[:, : self.decoder.num_semantic_levels]
+        decoded = self.decoder(flat_context, prefix, mode=mode)
+        scores = flat_context.new_zeros(flat_sids.size(0))
+        valid = (prefix != 0).all(dim=-1)
+        for level, logits in enumerate(decoded.semantic_logits):
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            tok = flat_sids[:, level].to(torch.long)
+            safe_tok = tok.clamp(min=0, max=log_probs.size(-1) - 1)
+            scores = scores + log_probs.gather(1, safe_tok.unsqueeze(1)).squeeze(1)
+            valid = valid & (tok > 0)
+        scores = scores.masked_fill(~valid, -1.0e9)
+        return scores.reshape(batch_size, num_candidates)
 
     def _item_ids_to_sid(self, item_ids: torch.Tensor) -> torch.Tensor:
         item_ids = item_ids.to(torch.long)

@@ -1,0 +1,43 @@
+# @package _global_
+
+defaults:
+  - serenfree_v2_future_ai_movies
+  - _self_
+
+tags: ["serenfree_v2", "movies", "lf_rank", "label_free"]
+
+model:
+  lambda_rank: 0.05
+  rank_temperature: 0.1
+  stopgrad_R_in_rank: true
+
+
+data:
+  train_dataset:
+    emit_rank_from_future_targets: true
+  val_dataset:
+    emit_rank_from_future_targets: true
+
+geometry:
+  enabled: true
+  features: ["prefix_surprise", "centroid_distance", "qwen_distance"]
+  prefix_levels: adaptive_semantic_non_dedup
+  centroid_levels: adaptive_semantic_non_dedup
+  geometry_levels: adaptive_semantic_non_dedup
+  history_len: 20
+  positive_rating_threshold: 4.0
+  recency_decay: 0.85
+  ring_low_quantile: 0.60
+  ring_high_quantile: 0.95
+  epsilon: 1.0e-6
+  use_dedup: false
+
+loss:
+  lambda_R: 1.0
+  lambda_I: 0.2
+  lambda_A: 0.2
+  lambda_rank: 0.05
+  rank_temperature: 0.1
+  rank_pos_max: 4
+  rank_neg_max: 64
+  stopgrad_R_in_rank: true

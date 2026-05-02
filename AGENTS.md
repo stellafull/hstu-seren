@@ -73,3 +73,13 @@ Before claiming completion:
 - Run the smallest meaningful verification available.
 - Check that the diff is limited to the requested scope.
 - State what was changed, what was verified, and any remaining risks.
+
+## SerenFree V2 remote execution
+
+Subsequent development/debugging for this repository should happen on this remote machine at `/root/autodl-tmp/hstu-seren`. The active research/implementation plan is `docs/serenfree_v2_final_plan.md`.
+
+Do not continue V1 S4 large runs. V2 supersedes V1 Stage2/3/4 for new work:
+- unified `LOO_FULL_CATALOG` only;
+- ser labels only in final evaluator;
+- S1 frozen as `HSTU-GenSID-R` relevance baseline;
+- future-window A/I targets, adaptive non-dedup AIG/geometry levels, context-level mining.

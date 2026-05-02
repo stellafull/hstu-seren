@@ -37,3 +37,22 @@ semantic_id_infer: ## Run semantic ID inference (Hydra config in configs/semanti
 
 semantic_id_pipeline: ## Run full embedding→training→inference pipeline
 	python src/generative_recommenders_pl/scripts/semantic_id_pipeline.py $(MAKEOVERRIDES)
+
+v2-test: ## Run V2 protocol/unit gates
+	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_loo_manifest.py tests/test_future_window_targets.py tests/test_no_ser_label_leakage.py tests/test_lf_rank_miner.py
+	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_trie_multipositive_loss.py tests/test_geometry_features.py tests/test_collision_resolver.py tests/test_aig_geo_inference.py
+	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_v2_wiring.py tests/test_future_window_dataset.py
+v2-build-loo: ## Build V2 LOO manifest: make v2-build-loo DATASET=x INPUT=path.csv SID_LOOKUP=path.pt
+	.venv/bin/python tools/build_loo_manifest.py --dataset $(DATASET) --input $(INPUT) --sid-lookup $(SID_LOOKUP)
+
+v2-audit-loo: ## Audit V2 LOO manifest: make v2-audit-loo MANIFEST_DIR=tmp/loo_manifest/x
+	.venv/bin/python tools/audit_loo_manifest.py $(MANIFEST_DIR)
+
+v2-build-future: ## Build V2 future targets: make v2-build-future LOO_TRAIN=... OUTPUT=...
+	.venv/bin/python tools/build_future_window_targets.py --loo-train $(LOO_TRAIN) --output $(OUTPUT)
+
+v2-mine-lf: ## Mine V2 context candidates: make v2-mine-lf FUTURE_TARGETS=... OUTPUT=...
+	.venv/bin/python tools/mine_label_free_ser_candidates.py --future-targets $(FUTURE_TARGETS) --output $(OUTPUT)
+
+v2-audit-ser-reachability: ## Audit ser target reachability: make v2-audit-ser-reachability LOO_EVAL=...
+	.venv/bin/python tools/audit_ser_target_reachability.py $(LOO_EVAL)

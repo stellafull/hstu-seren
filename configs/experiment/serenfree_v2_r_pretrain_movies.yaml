@@ -1,0 +1,36 @@
+# @package _global_
+
+defaults:
+  - serenfree_stage1_serenlens_movies
+  - _self_
+
+tags: ["serenfree_v2", "movies", "r_pretrain", "loo_full_catalog"]
+
+protocol:
+  name: LOO_FULL_CATALOG
+  k_values: [10, 50, 100, 200]
+  forbid_sampled_eval: true
+  forbid_gts_eval: true
+
+model:
+  future_target_loss: legacy_history_proxy
+  require_future_targets: false
+  lambda_i: 0.0
+  lambda_a: 0.0
+  lambda_rank: 0.0
+  stopgrad_R_in_rank: true
+
+label_free:
+  forbid_ser_labels_in_train: true
+  forbid_ser_labels_in_early_stop: true
+  forbid_ser_labels_in_hparam_selection: true
+
+serenfree_v2:
+  model_name: HSTU-GenSID-R
+  use_full_sid_in: true
+  use_full_sid_out: true
+  item_level_hstu: true
+  decoder_modes: ["R"]
+  train_dedup_for_R: true
+  train_dedup_for_I: false
+  train_dedup_for_A: false

@@ -23,6 +23,8 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from generative_recommenders_pl.models.serenfree import DecoderMode, SIDBeam
+from generative_recommenders_pl.models.serenfree.v2_levels import semantic_non_dedup_levels
+from generative_recommenders_pl.serenfree.geometry import prefix_surprise, relevance_safe_geometry_boost
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,8 +42,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-duplicate-sids", action="store_true")
     parser.add_argument("--aig", action="store_true")
     parser.add_argument("--aig-alpha", type=float, default=None)
-    parser.add_argument("--aig-levels", type=int, nargs="+", default=None)
+    parser.add_argument("--aig-levels", nargs="+", default=None)
     parser.add_argument("--aig-gate-min-acceptable-prob", type=float, default=None)
+    parser.add_argument("--late-fusion", action="store_true")
+    parser.add_argument("--candidate-M", type=int, default=None)
+    parser.add_argument("--relevance-floor-rank", type=int, default=None)
+    parser.add_argument("--beta", type=float, default=None)
+    parser.add_argument("--geometry-levels", nargs="+", default=None)
+    parser.add_argument("--ring-low-quantile", type=float, default=None)
+    parser.add_argument("--ring-high-quantile", type=float, default=None)
+    parser.add_argument("--geometry-recency-decay", type=float, default=None)
     parser.add_argument("--pseudo-ser-path", type=Path, default=None)
     parser.add_argument("--progress-every", type=int, default=None)
     parser.add_argument(
@@ -91,6 +101,7 @@ def main() -> None:
         model.sid_lookup.detach().cpu(),
         allow_duplicate_sids=args.allow_duplicate_sids,
     )
+    args.num_sid_columns = int(trie_audit["sid_columns"])
     audit = audit_pipeline(model=model, trie_audit=trie_audit, cfg=cfg, args=args)
     aig_config = AIGConfig.from_args(args)
     metrics = evaluate(
@@ -104,6 +115,7 @@ def main() -> None:
         max_batches=args.max_batches,
         progress_every=args.progress_every,
         aig=aig_config,
+        late_fusion=LateFusionConfig.from_args(args),
         pseudo_ser_labels=load_pseudo_ser_labels(args.pseudo_ser_path),
     )
     output = {"audit": audit, "metrics": metrics}
@@ -128,9 +140,15 @@ def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
         if eval_cfg is not None
         else {}
     )
+    inference_cfg = cfg.get("inference", None)
+    inference_cfg = (
+        OmegaConf.to_container(inference_cfg, resolve=True)
+        if inference_cfg is not None
+        else {}
+    )
 
     def configured(name: str, default: Any) -> Any:
-        return eval_cfg.get(name, default)
+        return eval_cfg.get(name, inference_cfg.get(name, default))
 
     if args.checkpoint is None:
         checkpoint = configured("checkpoint", None)
@@ -164,15 +182,39 @@ def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
     )
     args.aig = bool(args.aig or configured("aig", False))
     if args.aig_alpha is None:
-        args.aig_alpha = float(configured("aig_alpha", 0.0))
+        args.aig_alpha = float(configured("aig_alpha", configured("alpha", 0.0)))
     if args.aig_levels is None:
-        args.aig_levels = [
-            int(level) for level in configured("aig_levels", [1, 2])
-        ]
+        args.aig_levels = configured("aig_levels", "adaptive_semantic_non_dedup")
+    elif len(args.aig_levels) == 1 and args.aig_levels[0] == "adaptive_semantic_non_dedup":
+        args.aig_levels = "adaptive_semantic_non_dedup"
+    else:
+        args.aig_levels = [int(level) for level in args.aig_levels]
     if args.aig_gate_min_acceptable_prob is None:
         args.aig_gate_min_acceptable_prob = float(
             configured("aig_gate_min_acceptable_prob", 0.0)
         )
+    args.late_fusion = bool(args.late_fusion or configured("late_fusion", False))
+    candidate_m = configured("candidate_M", None)
+    if args.candidate_M is None:
+        args.candidate_M = None if candidate_m is None else int(candidate_m)
+    if args.late_fusion and args.candidate_M is None:
+        args.candidate_M = int(args.beam_size)
+    if args.relevance_floor_rank is None:
+        args.relevance_floor_rank = int(configured("relevance_floor_rank", args.candidate_M or args.beam_size))
+    if args.beta is None:
+        args.beta = float(configured("beta", 0.0))
+    if args.geometry_levels is None:
+        args.geometry_levels = configured("geometry_levels", "adaptive_semantic_non_dedup")
+    elif len(args.geometry_levels) == 1 and args.geometry_levels[0] == "adaptive_semantic_non_dedup":
+        args.geometry_levels = "adaptive_semantic_non_dedup"
+    else:
+        args.geometry_levels = [int(level) for level in args.geometry_levels]
+    if args.ring_low_quantile is None:
+        args.ring_low_quantile = float(configured("ring_low_quantile", 0.60))
+    if args.ring_high_quantile is None:
+        args.ring_high_quantile = float(configured("ring_high_quantile", 0.95))
+    if args.geometry_recency_decay is None:
+        args.geometry_recency_decay = float(configured("geometry_recency_decay", 0.85))
     if args.pseudo_ser_path is None:
         pseudo_ser_path = configured("pseudo_ser_path", None)
         args.pseudo_ser_path = (
@@ -343,8 +385,20 @@ def audit_pipeline(
         "aig_enabled": bool(args.aig),
         "aig_alpha": float(args.aig_alpha),
         "aig_levels": args.aig_levels,
-        "aig_touches_dedup": (trie_audit["dedup_column"] + 1) in args.aig_levels,
+        "aig_touches_dedup": False
+        if args.aig_levels == "adaptive_semantic_non_dedup"
+        else (trie_audit["dedup_column"] + 1) in args.aig_levels,
         "aig_gate_min_acceptable_prob": float(args.aig_gate_min_acceptable_prob),
+        "late_fusion_enabled": bool(args.late_fusion),
+        "candidate_M": None if args.candidate_M is None else int(args.candidate_M),
+        "relevance_floor_rank": int(args.relevance_floor_rank),
+        "geometry_beta": float(args.beta),
+        "geometry_levels": args.geometry_levels,
+        "geometry_touches_dedup": False
+        if args.geometry_levels == "adaptive_semantic_non_dedup"
+        else (trie_audit["dedup_column"] + 1) in args.geometry_levels,
+        "ring_low_quantile": float(args.ring_low_quantile),
+        "ring_high_quantile": float(args.ring_high_quantile),
         "pseudo_ser_path": None
         if args.pseudo_ser_path is None
         else str(args.pseudo_ser_path),
@@ -367,6 +421,7 @@ def evaluate(
     max_batches: int | None,
     progress_every: int,
     aig: "AIGConfig | None",
+    late_fusion: "LateFusionConfig | None",
     pseudo_ser_labels: set[int] | None,
 ) -> dict[str, Any]:
     sid_index = sid_index.to(device)
@@ -391,6 +446,15 @@ def evaluate(
             beam_size=beam_size,
             aig=aig,
         )
+        if late_fusion is not None:
+            beams_by_row = apply_late_fusion_to_beams(
+                model=model,
+                contexts=contexts,
+                batch=batch,
+                beams_by_row=beams_by_row,
+                cfg=late_fusion,
+                device=device,
+            )
 
         target_ids = batch["target_ids"].to(torch.long)
         history_ids = batch["historical_ids"].to(torch.long)
@@ -653,6 +717,127 @@ def decoder_level_logits(
     return decoder.heads[level](state)
 
 
+
+@dataclass(frozen=True)
+class LateFusionConfig:
+    """V2 late-fusion score settings for R + AIG + geometry."""
+
+    candidate_m: int
+    relevance_floor_rank: int
+    alpha: float
+    beta: float
+    geometry_levels: Any
+    ring_low_quantile: float
+    ring_high_quantile: float
+    geometry_recency_decay: float
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "LateFusionConfig | None":
+        if not args.late_fusion:
+            return None
+        candidate_m = int(args.candidate_M or args.beam_size)
+        return cls(
+            candidate_m=candidate_m,
+            relevance_floor_rank=int(args.relevance_floor_rank),
+            alpha=float(args.aig_alpha or 0.0),
+            beta=float(args.beta or 0.0),
+            geometry_levels=args.geometry_levels,
+            ring_low_quantile=float(args.ring_low_quantile),
+            ring_high_quantile=float(args.ring_high_quantile),
+            geometry_recency_decay=float(args.geometry_recency_decay),
+        )
+
+
+@torch.inference_mode()
+def apply_late_fusion_to_beams(
+    model: torch.nn.Module,
+    contexts: EvalContexts,
+    batch: dict[str, torch.Tensor],
+    beams_by_row: list[list[SIDBeam]],
+    cfg: LateFusionConfig,
+    device: torch.device,
+) -> list[list[SIDBeam]]:
+    history_ids = batch["historical_ids"].to(device)
+    history_sids = model._item_ids_to_sid(history_ids)
+    fused_rows: list[list[SIDBeam]] = []
+    for row_idx, beams in enumerate(beams_by_row):
+        candidates = beams[: cfg.candidate_m]
+        if not candidates:
+            fused_rows.append(beams)
+            continue
+        candidate_sids = torch.tensor([beam.sid for beam in candidates], dtype=torch.long, device=device)
+        candidate_scores = score_candidate_sids(
+            decoder=model.decoder,
+            contexts=EvalContexts(
+                relevance=contexts.relevance[row_idx : row_idx + 1].expand(len(candidates), -1),
+                imminent=contexts.imminent[row_idx : row_idx + 1].expand(len(candidates), -1),
+                acceptable=contexts.acceptable[row_idx : row_idx + 1].expand(len(candidates), -1),
+            ),
+            candidate_sids=candidate_sids,
+            alpha=cfg.alpha,
+        )
+        geometry = prefix_surprise(
+            history_sids[row_idx][(history_sids[row_idx] != 0).all(dim=-1)],
+            candidate_sids,
+            levels=cfg.geometry_levels,
+            recency_decay=cfg.geometry_recency_decay,
+        )
+        ranks = torch.arange(1, len(candidates) + 1, device=device)
+        fused_scores, _, _ = relevance_safe_geometry_boost(
+            candidate_scores,
+            geometry,
+            ranks,
+            beta=cfg.beta,
+            relevance_floor_rank=cfg.relevance_floor_rank,
+            low_q=cfg.ring_low_quantile,
+            high_q=cfg.ring_high_quantile,
+        )
+        fused = [
+            SIDBeam(item_id=beam.item_id, sid=beam.sid, score=float(fused_scores[idx].item()))
+            for idx, beam in enumerate(candidates)
+        ]
+        if len(beams) > len(candidates):
+            fused.extend(beams[len(candidates):])
+        fused_rows.append(sorted(fused, key=lambda beam: beam.score, reverse=True))
+    return fused_rows
+
+
+def score_candidate_sids(
+    decoder: torch.nn.Module,
+    contexts: EvalContexts,
+    candidate_sids: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    semantic_levels = int(decoder.num_semantic_levels)
+    scores_r = candidate_sids.new_zeros((candidate_sids.size(0),), dtype=torch.float32).to(candidate_sids.device)
+    scores_a = scores_r.clone()
+    scores_i = scores_r.clone()
+    prefix_tokens = candidate_sids[:, :semantic_levels]
+    valid = (prefix_tokens != 0).all(dim=-1)
+    for level in range(semantic_levels):
+        prefix_for_level = torch.zeros_like(prefix_tokens)
+        if level > 0:
+            prefix_for_level[:, :level] = prefix_tokens[:, :level]
+        tok = candidate_sids[:, level].to(torch.long)
+        for mode, context, sink in (
+            (DecoderMode.RELEVANCE, contexts.relevance, scores_r),
+            (DecoderMode.ACCEPTABLE, contexts.acceptable, scores_a),
+            (DecoderMode.IMMINENT, contexts.imminent, scores_i),
+        ):
+            logits = decoder_level_logits(
+                decoder=decoder,
+                context=context,
+                prefix_tokens=prefix_for_level,
+                level=level,
+                mode=mode,
+            )
+            log_probs = F.log_softmax(logits, dim=-1)
+            safe_tok = tok.clamp(min=0, max=log_probs.size(-1) - 1)
+            sink += log_probs.gather(1, safe_tok.unsqueeze(1)).squeeze(1)
+    final = scores_r + float(alpha) * (scores_a - scores_i)
+    return final.masked_fill(~valid, -1.0e9)
+
+
 @dataclass(frozen=True)
 class AIGConfig:
     """Inference-only Acceptability-Imminence Gap settings."""
@@ -667,7 +852,7 @@ class AIGConfig:
             return None
         return cls(
             alpha=float(args.aig_alpha),
-            levels_zero_based=tuple(int(level) - 1 for level in args.aig_levels),
+            levels_zero_based=semantic_non_dedup_levels(args.num_sid_columns, args.aig_levels),
             gate_min_acceptable_prob=float(args.aig_gate_min_acceptable_prob),
         )
 
