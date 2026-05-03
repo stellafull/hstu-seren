@@ -73,7 +73,9 @@ def main() -> None:
 
 
 def load_config(args: argparse.Namespace):
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from generative_recommenders_pl.utils.omegaconf_resolvers import register_safe_resolvers
+
+    register_safe_resolvers()
     repo_root = Path(__file__).resolve().parents[3]
     overrides = [f"experiment={args.experiment}", *args.override]
     with initialize_config_dir(version_base="1.3", config_dir=str(repo_root / "configs")):

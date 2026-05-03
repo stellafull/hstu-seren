@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from generative_recommenders_pl.models.serenfree.v2_levels import semantic_non_dedup_levels
 from generative_recommenders_pl.scripts.evaluate_serenfree_retrieval import (
     AIGConfig,
+    EvalContexts,
     LateFusionConfig,
     audit_pipeline,
     build_sid_transition_index,
@@ -132,6 +133,19 @@ def test_audit_pipeline_flags_explicit_dedup_level():
     assert audit["aig_touches_dedup"] is True
 
 
+def test_audit_marks_inline_aig_disabled_when_late_fusion_is_enabled():
+    audit = audit_pipeline(
+        model=_dummy_model(),
+        trie_audit={"sid_columns": 4, "dedup_column": 3},
+        cfg=_dummy_cfg(),
+        args=_dummy_args(aig=True, late_fusion=True, aig_alpha=0.5),
+    )
+
+    assert audit["inline_aig_enabled"] is False
+    assert audit["inline_aig_disabled_by_late_fusion"] is True
+    assert audit["late_fusion_ai_gap_alpha"] == 0.5
+
+
 @pytest.mark.parametrize("root", [Path("configs"), Path("src"), Path("evaluator")])
 def test_no_hard_coded_nonadaptive_aig_levels_regression(root: Path):
     if not root.exists():
@@ -175,6 +189,7 @@ def test_late_fusion_config_parses_v2_knobs():
     assert cfg.candidate_m == 1000
     assert cfg.relevance_floor_rank == 500
     assert cfg.beta == 0.25
+    assert cfg.alpha == 0.5
 
 
 def test_late_fusion_scores_modes_with_separate_contexts():
@@ -189,6 +204,7 @@ def test_late_fusion_scores_modes_with_separate_contexts():
             return context
     decoder = TinyDecoder()
     decoder.heads[0].weight.data = torch.eye(3, 2)
+    decoder.heads[1].weight.data.zero_()
     contexts = SimpleNamespace(
         relevance=torch.tensor([[3.0, 0.0], [3.0, 0.0]]),
         acceptable=torch.tensor([[0.0, 3.0], [0.0, 3.0]]),
@@ -197,3 +213,38 @@ def test_late_fusion_scores_modes_with_separate_contexts():
     candidate_sids = torch.tensor([[1, 1], [2, 1]])
     scores = score_candidate_sids(decoder, contexts, candidate_sids, alpha=1.0)
     assert scores[0] > scores[1]
+
+
+def test_late_fusion_candidate_score_uses_relevance_dedup_only():
+    class TinyDecoder(torch.nn.Module):
+        num_semantic_levels = 1
+        prefix_dim = 2
+        mode_embedding = torch.nn.Embedding(3, 2)
+        heads = torch.nn.ModuleList(
+            [
+                torch.nn.Linear(2, 3, bias=False),
+                torch.nn.Linear(2, 3, bias=False),
+            ]
+        )
+
+        def _prefix_parts(self, prefix_tokens, level, empty_prefix):
+            return []
+
+        def _state(self, context, mode_emb, level, prefix_parts):
+            return context
+
+    decoder = TinyDecoder()
+    decoder.heads[0].weight.data.zero_()
+    decoder.heads[1].weight.data = torch.tensor(
+        [[0.0, 0.0], [0.0, 0.0], [3.0, 0.0]]
+    )
+    contexts = EvalContexts(
+        relevance=torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+        acceptable=torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+        imminent=torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+    )
+    candidate_sids = torch.tensor([[1, 1], [1, 2]])
+
+    scores = score_candidate_sids(decoder, contexts, candidate_sids, alpha=10.0)
+
+    assert scores[1] > scores[0]

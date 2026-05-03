@@ -25,6 +25,12 @@ label_free:
   forbid_ser_labels_in_early_stop: true
   forbid_ser_labels_in_hparam_selection: true
 
+main_method:
+  use_serendipity_labels_for_loss: false
+  use_serendipity_labels_for_early_stopping: false
+  use_serendipity_labels_for_hpo: false
+  use_serendipity_labels_for_eval: true
+
 serenfree_v2:
   model_name: HSTU-GenSID-R
   use_full_sid_in: true

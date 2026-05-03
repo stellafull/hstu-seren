@@ -58,8 +58,14 @@ def test_v2_future_training_configs_use_future_window_dataset():
         assert "FutureWindowTargetDataset" in text
         assert "future_targets/" in text
         assert "emit_rank_from_future_targets: false" in text
+        assert "acceptable_min_gap: 4" in text
+        assert "val_dataset:" not in text
     for cfg in rank_cfgs:
-        assert "emit_rank_from_future_targets: true" in cfg.read_text()
+        text = cfg.read_text()
+        assert "emit_rank_from_future_targets: true" in text
+        assert "val_dataset:" not in text
+        assert 'features: ["prefix_surprise"]' in text
+        assert "qwen_distance" not in text
 
 
 def test_v2_eval_configs_enable_late_fusion_and_alpha_mapping():
@@ -68,6 +74,7 @@ def test_v2_eval_configs_enable_late_fusion_and_alpha_mapping():
     for cfg in eval_cfgs:
         text = cfg.read_text()
         assert "late_fusion: true" in text
+        assert "aig: false" in text
         assert "aig_alpha: ${inference.alpha}" in text
         assert "candidate_M: ${inference.candidate_M}" in text
         assert "geometry_levels: ${inference.geometry_levels}" in text

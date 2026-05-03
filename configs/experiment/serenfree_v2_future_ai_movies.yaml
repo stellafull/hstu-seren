@@ -15,7 +15,7 @@ model:
 
 future_targets:
   imminent_window: 3
-  acceptable_min_gap: 2
+  acceptable_min_gap: 4
   acceptable_window: 50
   rating_positive_threshold: 4.0
   max_i_targets: 3
@@ -35,13 +35,6 @@ data:
     max_i_targets: ${future_targets.max_i_targets}
     max_a_targets: ${future_targets.max_a_targets}
     emit_rank_from_future_targets: false
-  val_dataset:
-    _target_: generative_recommenders_pl.data.reco_dataset.FutureWindowTargetDataset
-    ratings_file: ${paths.root_dir}/tmp/future_targets/movies/loo_v1/future_targets.parquet
-    max_i_targets: ${future_targets.max_i_targets}
-    max_a_targets: ${future_targets.max_a_targets}
-    emit_rank_from_future_targets: false
-
 serenfree_v2:
   decoder_modes: ["R", "I", "A"]
   train_dedup_for_R: true

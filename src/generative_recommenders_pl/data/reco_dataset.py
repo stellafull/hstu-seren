@@ -1,6 +1,7 @@
+import ast
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
 import lightning as L
@@ -9,6 +10,7 @@ import torch
 from omegaconf import DictConfig
 
 from generative_recommenders_pl.data.preprocessor import DataProcessor
+from generative_recommenders_pl.serenfree.geometry import prefix_surprise
 from generative_recommenders_pl.utils.logger import RankedLogger
 
 log = RankedLogger(__name__)
@@ -30,6 +32,32 @@ def save_data(ratings_frame: pd.DataFrame, output_file: str):
         ratings_frame.to_csv(output_file, index=False)
     else:
         raise ValueError("ratings_file must be a csv file.")
+
+
+def parse_sequence_value(value: Any) -> list[Any]:
+    """Parse stored sequence columns without executing input text."""
+
+    if value is None:
+        return []
+    if isinstance(value, float) and pd.isna(value):
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text[0] in "[(":
+            parsed = ast.literal_eval(text)
+        elif text[0] == "{":
+            parsed = json.loads(text)
+        else:
+            parsed = [part for part in text.split(",") if part != ""]
+    elif hasattr(value, "tolist"):
+        parsed = value.tolist()
+    else:
+        parsed = value
+    if isinstance(parsed, (list, tuple)):
+        return list(parsed)
+    return [parsed]
 
 
 class RecoDataset(torch.utils.data.Dataset):
@@ -104,22 +132,21 @@ class RecoDataset(torch.utils.data.Dataset):
         data = self.ratings_frame.iloc[idx]
         user_id = data.user_id
 
-        def eval_as_list(x, ignore_last_n) -> List[int]:
-            y = eval(x)
-            y_list = [y] if isinstance(y, int) else list(y)
+        def parse_as_list(x, ignore_last_n) -> List[int]:
+            y_list = [int(float(v)) for v in parse_sequence_value(x)]
             if ignore_last_n > 0:
                 # for training data creation
                 y_list = y_list[:-ignore_last_n]
             return y_list
 
-        def eval_int_list(
+        def parse_int_list(
             x,
             target_len: int,
             ignore_last_n: int,
             shift_id_by: int,
             sampling_kept_mask: Optional[List[bool]],
         ) -> Tuple[List[int], int]:
-            y = eval_as_list(x, ignore_last_n=ignore_last_n)
+            y = parse_as_list(x, ignore_last_n=ignore_last_n)
             if sampling_kept_mask is not None:
                 y = [x for x, kept in zip(y, sampling_kept_mask) if kept]
             y_len = len(y)
@@ -129,28 +156,28 @@ class RecoDataset(torch.utils.data.Dataset):
             return y, y_len
 
         if self._sample_ratio < 1.0:
-            raw_length = len(eval_as_list(data.sequence_item_ids, self._ignore_last_n))
+            raw_length = len(parse_as_list(data.sequence_item_ids, self._ignore_last_n))
             sampling_kept_mask = (
                 torch.rand((raw_length,), dtype=torch.float32) < self._sample_ratio
             ).tolist()
         else:
             sampling_kept_mask = None
 
-        movie_history, movie_history_len = eval_int_list(
+        movie_history, movie_history_len = parse_int_list(
             data.sequence_item_ids,
             self._padding_length,
             self._ignore_last_n,
             shift_id_by=self._shift_id_by,
             sampling_kept_mask=sampling_kept_mask,
         )
-        movie_history_ratings, ratings_len = eval_int_list(
+        movie_history_ratings, ratings_len = parse_int_list(
             data.sequence_ratings,
             self._padding_length,
             self._ignore_last_n,
             0,
             sampling_kept_mask=sampling_kept_mask,
         )
-        movie_timestamps, timestamps_len = eval_int_list(
+        movie_timestamps, timestamps_len = parse_int_list(
             data.sequence_timestamps,
             self._padding_length,
             self._ignore_last_n,
@@ -159,7 +186,7 @@ class RecoDataset(torch.utils.data.Dataset):
         )
         ser_sequence = None
         if "sequence_ser_label" in data:
-            ser_sequence, ser_len = eval_int_list(
+            ser_sequence, ser_len = parse_int_list(
                 data.sequence_ser_label,
                 self._padding_length,
                 self._ignore_last_n,
@@ -342,12 +369,47 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
             out[idx, : len(sid)] = torch.tensor(sid, dtype=torch.int64)
         return out
 
+    def _all_sids(self, values) -> torch.Tensor:
+        parsed = self._loads(values)
+        if not parsed:
+            return torch.zeros((0, self.sid_columns), dtype=torch.int64)
+        out = torch.zeros((len(parsed), self.sid_columns), dtype=torch.int64)
+        for idx, sid in enumerate(parsed):
+            if not sid:
+                continue
+            sid = [int(token) for token in sid[: self.sid_columns]]
+            out[idx, : len(sid)] = torch.tensor(sid, dtype=torch.int64)
+        return out
+
     def _row_value(self, row: pd.Series, name: str, default=0):
         return row[name] if name in row.index else default
 
-    def _rank_candidates(self, a_sids: torch.Tensor, i_sids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        pos = a_sids[(a_sids != 0).any(dim=1)][: self.max_a_targets]
-        neg = i_sids[(i_sids != 0).any(dim=1)][: self.max_i_targets]
+    def _rank_candidates(
+        self,
+        a_items: list[int],
+        a_sids: torch.Tensor,
+        i_items: list[int],
+        i_sids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        def dedup(items: list[int], sids: torch.Tensor, limit: int, blocked: set[int] | None = None) -> torch.Tensor:
+            blocked = blocked or set()
+            rows = []
+            seen: set[int] = set()
+            for item, sid in zip(items, sids):
+                item = int(item)
+                if item in seen or item in blocked or not bool((sid != 0).any().item()):
+                    continue
+                seen.add(item)
+                rows.append(sid)
+                if len(rows) >= limit:
+                    break
+            if not rows:
+                return torch.zeros((0, self.sid_columns), dtype=torch.int64)
+            return torch.stack(rows).to(torch.int64)
+
+        i_item_set = {int(item) for item in i_items}
+        pos = dedup(a_items, a_sids, self.max_a_targets, blocked=i_item_set)
+        neg = dedup(i_items, i_sids, self.max_i_targets)
         width = self.max_a_targets + self.max_i_targets
         candidates = torch.zeros((width, self.sid_columns), dtype=torch.int64)
         positive_mask = torch.zeros(width, dtype=torch.bool)
@@ -365,6 +427,8 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
         history_ratings = [int(float(x)) for x in self._loads(row.history_ratings)]
         history_timestamps = [int(float(x)) for x in self._loads(row.history_timestamps)]
         history_length = min(len(history_items), self._history_padding_length)
+        i_items = [int(x) for x in self._loads(self._row_value(row, "I_items", "[]"))]
+        a_items = [int(x) for x in self._loads(self._row_value(row, "A_items", "[]"))]
         i_sids = self._pad_sids(self._row_value(row, "I_sids", "[]"), self.max_i_targets)
         a_sids = self._pad_sids(self._row_value(row, "A_sids", "[]"), self.max_a_targets)
         r_item = self._row_value(row, "R_item", self._row_value(row, "pos_item_id", 0))
@@ -383,9 +447,25 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
             "A_sids": a_sids,
         }
         if self.emit_rank_from_future_targets:
-            rank_sids, positive_mask = self._rank_candidates(a_sids, i_sids)
+            if "history_sids" not in row.index:
+                raise ValueError(
+                    "FutureWindowTargetDataset needs history_sids to emit rank_geometry; "
+                    "rebuild future targets with tools/build_future_window_targets.py."
+                )
+            rank_sids, positive_mask = self._rank_candidates(
+                a_items,
+                self._all_sids(self._row_value(row, "A_sids", "[]")),
+                i_items,
+                self._all_sids(self._row_value(row, "I_sids", "[]")),
+            )
+            history_sids = self._pad_sids(row.history_sids, max(len(history_items), 1))
+            valid_history_sids = history_sids[(history_sids != 0).all(dim=1)]
             ret["rank_candidate_sids"] = rank_sids
-            ret["rank_geometry"] = torch.zeros(rank_sids.size(0), dtype=torch.float32)
+            ret["rank_geometry"] = prefix_surprise(
+                valid_history_sids,
+                rank_sids,
+                levels="adaptive_semantic_non_dedup",
+            ).to(torch.float32)
             ret["rank_positive_mask"] = positive_mask
         return ret
 

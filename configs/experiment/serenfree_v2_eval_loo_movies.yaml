@@ -22,7 +22,7 @@ inference:
 
 serenfree_eval:
   beam_size: 1000
-  aig: true
+  aig: false
   aig_alpha: ${inference.alpha}
   late_fusion: ${inference.late_fusion}
   candidate_M: ${inference.candidate_M}

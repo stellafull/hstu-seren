@@ -13,7 +13,10 @@ _RUNTIME = None
 log = None
 
 
-OmegaConf.register_new_resolver("eval", eval)
+from generative_recommenders_pl.utils.omegaconf_resolvers import register_safe_resolvers
+
+
+register_safe_resolvers()
 
 
 def _runtime_imports():
@@ -49,6 +52,18 @@ def _runtime_imports():
 
 def enforce_label_free_config(cfg: DictConfig) -> None:
     label_free = cfg.get("label_free")
+    main_method = cfg.get("main_method")
+    if main_method:
+        forbidden = {
+            "use_serendipity_labels_for_loss": "loss",
+            "use_serendipity_labels_for_early_stopping": "early stopping",
+            "use_serendipity_labels_for_hpo": "hyperparameter selection",
+        }
+        for key, name in forbidden.items():
+            if bool(main_method.get(key, False)):
+                raise ValueError(
+                    f"SerenFree main_method must not use serendipity labels for {name}"
+                )
     if not label_free:
         return
     if bool(label_free.get("forbid_ser_labels_in_train", False)):

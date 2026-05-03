@@ -15,14 +15,11 @@ model:
 data:
   train_dataset:
     emit_rank_from_future_targets: true
-  val_dataset:
-    emit_rank_from_future_targets: true
 
 geometry:
   enabled: true
-  features: ["prefix_surprise", "centroid_distance", "qwen_distance"]
+  features: ["prefix_surprise"]
   prefix_levels: adaptive_semantic_non_dedup
-  centroid_levels: adaptive_semantic_non_dedup
   geometry_levels: adaptive_semantic_non_dedup
   history_len: 20
   positive_rating_threshold: 4.0

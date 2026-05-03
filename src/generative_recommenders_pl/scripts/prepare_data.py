@@ -11,11 +11,12 @@ from omegaconf import DictConfig, OmegaConf
 
 from generative_recommenders_pl.data.preprocessor import DataProcessor
 from generative_recommenders_pl.utils.logger import RankedLogger
+from generative_recommenders_pl.utils.omegaconf_resolvers import register_safe_resolvers
 
 log = RankedLogger(__name__)
 
 
-OmegaConf.register_new_resolver("eval", eval)
+register_safe_resolvers()
 
 
 @hydra.main(

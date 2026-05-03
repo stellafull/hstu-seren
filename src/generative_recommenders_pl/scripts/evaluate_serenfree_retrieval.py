@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from generative_recommenders_pl.models.serenfree import DecoderMode, SIDBeam
 from generative_recommenders_pl.models.serenfree.v2_levels import semantic_non_dedup_levels
 from generative_recommenders_pl.serenfree.geometry import prefix_surprise, relevance_safe_geometry_boost
+from generative_recommenders_pl.utils.omegaconf_resolvers import register_safe_resolvers
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +105,7 @@ def main() -> None:
     args.num_sid_columns = int(trie_audit["sid_columns"])
     audit = audit_pipeline(model=model, trie_audit=trie_audit, cfg=cfg, args=args)
     aig_config = AIGConfig.from_args(args)
+    late_fusion_config = LateFusionConfig.from_args(args)
     metrics = evaluate(
         model=model,
         dataloader=dataloader,
@@ -115,7 +117,7 @@ def main() -> None:
         max_batches=args.max_batches,
         progress_every=args.progress_every,
         aig=aig_config,
-        late_fusion=LateFusionConfig.from_args(args),
+        late_fusion=late_fusion_config,
         pseudo_ser_labels=load_pseudo_ser_labels(args.pseudo_ser_path),
     )
     output = {"audit": audit, "metrics": metrics}
@@ -126,7 +128,7 @@ def main() -> None:
 
 
 def load_config(args: argparse.Namespace) -> Any:
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    register_safe_resolvers()
     repo_root = Path(__file__).resolve().parents[3]
     overrides = [f"experiment={args.experiment}", *args.override]
     with initialize_config_dir(version_base="1.3", config_dir=str(repo_root / "configs")):
@@ -382,7 +384,9 @@ def audit_pipeline(
         and len(model.decoder.heads) == trie_audit["sid_columns"],
         "item_level_hstu": hasattr(model, "sequence_encoder"),
         "aig_bias_supported": True,
-        "aig_enabled": bool(args.aig),
+        "inline_aig_enabled": bool(args.aig and not args.late_fusion),
+        "inline_aig_disabled_by_late_fusion": bool(args.aig and args.late_fusion),
+        "aig_enabled": bool(args.aig and not args.late_fusion),
         "aig_alpha": float(args.aig_alpha),
         "aig_levels": args.aig_levels,
         "aig_touches_dedup": False
@@ -390,6 +394,7 @@ def audit_pipeline(
         else (trie_audit["dedup_column"] + 1) in args.aig_levels,
         "aig_gate_min_acceptable_prob": float(args.aig_gate_min_acceptable_prob),
         "late_fusion_enabled": bool(args.late_fusion),
+        "late_fusion_ai_gap_alpha": float(args.aig_alpha if args.late_fusion else 0.0),
         "candidate_M": None if args.candidate_M is None else int(args.candidate_M),
         "relevance_floor_rank": int(args.relevance_floor_rank),
         "geometry_beta": float(args.beta),
@@ -439,12 +444,13 @@ def evaluate(
         if max_batches is not None and batch_idx >= max_batches:
             break
         contexts = encode_contexts(model=model, batch=batch, device=device)
+        beam_aig = None if late_fusion is not None else aig
         beams_by_row = batched_constrained_beam_search(
             decoder=model.decoder,
             contexts=contexts,
             sid_index=sid_index,
             beam_size=beam_size,
-            aig=aig,
+            aig=beam_aig,
         )
         if late_fusion is not None:
             beams_by_row = apply_late_fusion_to_beams(
@@ -813,7 +819,7 @@ def score_candidate_sids(
     scores_a = scores_r.clone()
     scores_i = scores_r.clone()
     prefix_tokens = candidate_sids[:, :semantic_levels]
-    valid = (prefix_tokens != 0).all(dim=-1)
+    valid = (candidate_sids[:, : semantic_levels + 1] != 0).all(dim=-1)
     for level in range(semantic_levels):
         prefix_for_level = torch.zeros_like(prefix_tokens)
         if level > 0:
@@ -834,6 +840,18 @@ def score_candidate_sids(
             log_probs = F.log_softmax(logits, dim=-1)
             safe_tok = tok.clamp(min=0, max=log_probs.size(-1) - 1)
             sink += log_probs.gather(1, safe_tok.unsqueeze(1)).squeeze(1)
+    dedup_level = semantic_levels
+    dedup_tok = candidate_sids[:, dedup_level].to(torch.long)
+    dedup_logits = decoder_level_logits(
+        decoder=decoder,
+        context=contexts.relevance,
+        prefix_tokens=prefix_tokens,
+        level=dedup_level,
+        mode=DecoderMode.RELEVANCE,
+    )
+    dedup_log_probs = F.log_softmax(dedup_logits, dim=-1)
+    safe_dedup_tok = dedup_tok.clamp(min=0, max=dedup_log_probs.size(-1) - 1)
+    scores_r += dedup_log_probs.gather(1, safe_dedup_tok.unsqueeze(1)).squeeze(1)
     final = scores_r + float(alpha) * (scores_a - scores_i)
     return final.masked_fill(~valid, -1.0e9)
 

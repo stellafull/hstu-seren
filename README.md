@@ -45,6 +45,9 @@ uv pip install fbgemm-gpu
 
 ## How to Run
 
+The repository has a root `makefile` with convenience commands. The same
+workflows can also be run directly with the Python entrypoints shown below.
+
 Prepare dataset based on configs/data, first build pre-train dataset, then build tuning dataset
 
 Download data
@@ -104,6 +107,34 @@ Override Parameters from the Command Line
 
 ```bash
 make train trainer.max_epochs=20 data.batch_size=64
+```
+
+### SerenFree V2 Pipeline
+
+V2 training uses future-window targets for training only; validation and test
+keep the existing LOO last-item dataset semantics. Small serendipity datasets
+are still used for target-domain adaptation through ordinary interaction
+sequences, but their serendipity annotations are reported only in the final
+retrieval evaluation and must not be used for training, early stopping,
+checkpoint selection, or hyperparameter selection in the main SerenFree method.
+
+Direct entrypoints:
+
+```bash
+python tools/build_future_window_targets.py \
+  --loo-train tmp/loo_manifest/books/loo_train.parquet \
+  --output tmp/future_targets/books/loo_v1/future_targets.parquet
+
+python src/generative_recommenders_pl/scripts/train.py \
+  experiment=serenfree_v2_future_ai_books
+
+python src/generative_recommenders_pl/scripts/train.py \
+  experiment=serenfree_v2_lf_rank_books \
+  init_from_checkpoint=tmp/checkpoints/serenfree_v2_future_ai_books/last.ckpt
+
+python src/generative_recommenders_pl/scripts/evaluate_serenfree_retrieval.py \
+  --experiment serenfree_v2_eval_loo_books \
+  --checkpoint tmp/checkpoints/serenfree_v2_lf_rank_books/last.ckpt
 ```
 
 Feel free to explore and modify the configurations to suit your needs. Your contributions and suggestions are always welcome!

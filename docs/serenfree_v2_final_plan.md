@@ -6,6 +6,9 @@ Status: active execution plan. This supersedes V1 Stage2/3/4 for new work.
 
 - Evaluation protocol: `LOO_FULL_CATALOG` only. No GTS, sampled split, or 1-positive+100-negative eval.
 - Serendipity labels: final evaluation only (`metrics.ser_targets_only`). Never train, early-stop, mine, or tune hyperparameters on ser labels.
+- Small serendipity datasets are still used for target-domain adaptation, but
+  only through ordinary interaction sequences and label-free future-session
+  acceptability targets.
 - Main claim: label-free serendipity mechanism, not HSTU/SID strength.
 - S1 remains frozen as `HSTU-GenSID-R` relevance baseline.
 - S2/S3/S4 must be rewritten around future-window A/I, geometry, and context-level ranking.
@@ -56,7 +59,7 @@ protocol:
 
 future_targets:
   imminent_window: 3
-  acceptable_min_gap: 2
+  acceptable_min_gap: 4
   acceptable_window: 50
   rating_positive_threshold: 4.0
   max_i_targets: 3
@@ -67,9 +70,8 @@ future_targets:
 
 geometry:
   enabled: true
-  features: [prefix_surprise, centroid_distance, qwen_distance]
+  features: [prefix_surprise]
   prefix_levels: adaptive_semantic_non_dedup
-  centroid_levels: adaptive_semantic_non_dedup
   history_len: 20
   recency_decay: 0.85
   ring_low_quantile: 0.60
@@ -95,6 +97,12 @@ inference:
   geometry_levels: adaptive_semantic_non_dedup
   touch_dedup: false
   history_filter: true
+
+main_method:
+  use_serendipity_labels_for_loss: false
+  use_serendipity_labels_for_early_stopping: false
+  use_serendipity_labels_for_hpo: false
+  use_serendipity_labels_for_eval: true
 ```
 
 ## Execution order
@@ -107,3 +115,22 @@ inference:
 6. Implement multi-positive trie marginal loss.
 7. MovieLens R-only -> future A/I -> AIG+geometry eval -> LF-rank.
 8. Extend to Books; run Movies only after reachability audit passes.
+
+## Current implementation notes
+
+- Future-window targets are used for V2 training only. Validation and test use
+  the ordinary LOO last-item `RecoDataset` setup (`ignore_last_n=0`) to avoid
+  creating additional small-dataset splits.
+- Stage 2 on SerenLens / Serendipity-2018 is label-free domain adaptation:
+  use the dataset's ordinary interaction sequences to build near-session `I_t`
+  and future-session acceptable `A_t`; do not use `sequence_ser_label` or answer
+  ser labels in the loss.
+- `ser_targets_only` is a final reporting bucket in
+  `evaluate_serenfree_retrieval.py`; it must not drive training, early stopping,
+  checkpoint selection, or hyperparameter selection.
+- Any run that uses ser labels for loss, alpha/beta selection, early stopping,
+  or HPO must be reported separately as supervised or label-assisted baseline,
+  not as the SerenFree main method.
+- Default geometry currently enables only `prefix_surprise`. Additional
+  geometry sources such as centroid or Qwen/content distance should stay out of
+  default configs until they are wired into the train/eval scoring path.

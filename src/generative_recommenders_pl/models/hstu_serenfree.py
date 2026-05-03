@@ -137,20 +137,20 @@ class HSTUSerenFreeStage1(L.LightningModule):
         log.info("Compiled HSTU-SerenFree sequence encoder and decoder")
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        loss, metrics = self._step(batch)
+        loss, metrics = self._step(batch, require_aux_targets=True)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         for key, value in metrics.items():
             self.log(f"train/{key}", value, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
-        loss, metrics = self._step(batch)
+        loss, metrics = self._step(batch, require_aux_targets=False)
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         for key, value in metrics.items():
             self.log(f"val/{key}", value, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
-        loss, metrics = self._step(batch)
+        loss, metrics = self._step(batch, require_aux_targets=False)
         self.log("test/loss", loss, on_step=False, on_epoch=True)
         for key, value in metrics.items():
             self.log(f"test/{key}", value, on_step=False, on_epoch=True)
@@ -178,7 +178,11 @@ class HSTUSerenFreeStage1(L.LightningModule):
             },
         }
 
-    def _step(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _step(
+        self,
+        batch: dict[str, Any],
+        require_aux_targets: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         historical_ids = batch["historical_ids"].to(self.device)
         target_ids = batch["target_ids"].to(self.device)
         lengths = batch["history_lengths"].to(self.device)
@@ -205,6 +209,8 @@ class HSTUSerenFreeStage1(L.LightningModule):
         )
         loss = relevance_loss(decoded, target_sid, lambda_d=self.lambda_d)
         metrics = self._prefix_metrics(decoded.as_list(), target_sid)
+        if not require_aux_targets:
+            return loss, metrics
 
         imminent = None
         acceptable = None
@@ -422,7 +428,12 @@ class HSTUSerenFreeStage1(L.LightningModule):
         decoded = self.decoder(flat_context, prefix, mode=mode)
         scores = flat_context.new_zeros(flat_sids.size(0))
         valid = (prefix != 0).all(dim=-1)
-        for level, logits in enumerate(decoded.semantic_logits):
+        logits_by_level = (
+            decoded.level_logits
+            if mode == DecoderMode.RELEVANCE
+            else decoded.semantic_logits
+        )
+        for level, logits in enumerate(logits_by_level):
             log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
             tok = flat_sids[:, level].to(torch.long)
             safe_tok = tok.clamp(min=0, max=log_probs.size(-1) - 1)
