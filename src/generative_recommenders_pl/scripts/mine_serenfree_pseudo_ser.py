@@ -1,5 +1,8 @@
 """Mine label-free pseudo-ser positives for HSTU-SerenFree.
 
+Legacy V1 utility: new SerenFree V2 experiments should use
+``tools/mine_label_free_ser_candidates.py`` or future-window targets instead.
+
 V1 mining is intentionally offline and teacher-scored. It does not update the
 teacher and writes a small table usable by retrieval evaluation and Stage 4
 fine-tuning.
@@ -37,6 +40,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    print(
+        "WARNING: mine_serenfree_pseudo_ser.py is a legacy V1 utility; "
+        "use tools/mine_label_free_ser_candidates.py for V2 context-level mining.",
+        flush=True,
+    )
     cfg = load_config(args)
     datamodule = hydra.utils.instantiate(cfg.data, _recursive_=False)
     model = hydra.utils.instantiate(cfg.model, datamodule=datamodule, _recursive_=False)

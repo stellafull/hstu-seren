@@ -15,6 +15,7 @@ from generative_recommenders_pl.scripts.evaluate_serenfree_retrieval import (
     LateFusionConfig,
     audit_pipeline,
     build_sid_transition_index,
+    load_manifest_meta,
     score_candidate_sids,
 )
 from generative_recommenders_pl.serenfree.geometry import relevance_safe_geometry_boost
@@ -47,6 +48,8 @@ def _dummy_args(**overrides) -> Namespace:
         "ring_low_quantile": 0.60,
         "ring_high_quantile": 0.95,
         "geometry_recency_decay": 0.85,
+        "geometry_epsilon": 1e-6,
+        "geometry_history_len": None,
     }
     data.update(overrides)
     return Namespace(**data)
@@ -146,6 +149,35 @@ def test_audit_marks_inline_aig_disabled_when_late_fusion_is_enabled():
     assert audit["late_fusion_ai_gap_alpha"] == 0.5
 
 
+def test_audit_pipeline_records_manifest_hashes(tmp_path):
+    manifest_dir = tmp_path / "manifest"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest_meta.json").write_text(
+        """{"protocol":"SER_EVENT_FULL_CATALOG","denominator":"num_ser_queries","manifest_hash":"mh","item_universe_hash":"ih","sid_lookup_hash":"sh","trie_hash":"th"}"""
+    )
+    cfg = OmegaConf.create(
+        {
+            "model": {"sid_lookup_path": "tmp/sid_lookup.pt", "sid_path": "tmp/sid.pt"},
+            "serenfree_eval": {"manifest_dir": str(manifest_dir)},
+        }
+    )
+
+    audit = audit_pipeline(
+        model=_dummy_model(),
+        trie_audit={"sid_columns": 4, "dedup_column": 3},
+        cfg=cfg,
+        args=_dummy_args(),
+    )
+
+    assert audit["loo_manifest_hash"] == "mh"
+    assert audit["eval_protocol"] == "SER_EVENT_FULL_CATALOG"
+    assert audit["eval_denominator"] == "num_ser_queries"
+    assert audit["item_universe_hash"] == "ih"
+    assert audit["manifest_sid_lookup_hash"] == "sh"
+    assert audit["manifest_trie_hash"] == "th"
+    assert audit["loo_manifest_meta_path"] == str(manifest_dir / "manifest_meta.json")
+
+
 @pytest.mark.parametrize("root", [Path("configs"), Path("src"), Path("evaluator")])
 def test_no_hard_coded_nonadaptive_aig_levels_regression(root: Path):
     if not root.exists():
@@ -190,6 +222,27 @@ def test_late_fusion_config_parses_v2_knobs():
     assert cfg.relevance_floor_rank == 500
     assert cfg.beta == 0.25
     assert cfg.alpha == 0.5
+    assert cfg.geometry_epsilon == 1e-6
+
+
+def test_load_manifest_meta_falls_back_to_split_ratings_path(tmp_path):
+    manifest_dir = tmp_path / "manifest"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest_meta.json").write_text('{"manifest_hash":"from-split"}')
+    cfg = OmegaConf.create(
+        {
+            "data": {
+                "test_dataset": {
+                    "ratings_file": str(manifest_dir / "loo_eval.parquet")
+                }
+            }
+        }
+    )
+    args = _dummy_args(split="test")
+
+    meta = load_manifest_meta(cfg, args)
+
+    assert meta["manifest_hash"] == "from-split"
 
 
 def test_late_fusion_scores_modes_with_separate_contexts():

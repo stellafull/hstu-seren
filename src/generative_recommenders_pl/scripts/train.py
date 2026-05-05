@@ -71,7 +71,8 @@ def enforce_label_free_config(cfg: DictConfig) -> None:
         if pseudo_path not in {None, "", "null"}:
             raise ValueError("label_free forbids pseudo_ser_path / ser-label-derived training inputs")
     if bool(label_free.get("forbid_ser_labels_in_early_stop", False)):
-        monitor = cfg.get("callbacks", {}).get("early_stopping", {}).get("monitor") if cfg.get("callbacks") else None
+        early_stopping = cfg.get("callbacks", {}).get("early_stopping") if cfg.get("callbacks") else None
+        monitor = early_stopping.get("monitor") if early_stopping else None
         if monitor and "ser" in str(monitor).lower():
             raise ValueError("label_free forbids ser-label early stopping monitors")
     if bool(label_free.get("forbid_ser_labels_in_hparam_selection", False)):
@@ -110,17 +111,30 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             map_location="cpu",
             weights_only=False,
         )
-        state_dict = {
-            name: value
-            for name, value in checkpoint["state_dict"].items()
-            if name != "pseudo_ser_items"
-        }
+        current_state = model.state_dict()
+        skipped_shape_mismatch = []
+        state_dict = {}
+        for name, value in checkpoint["state_dict"].items():
+            if name == "pseudo_ser_items":
+                continue
+            current_value = current_state.get(name)
+            if current_value is not None and current_value.shape != value.shape:
+                skipped_shape_mismatch.append(
+                    (name, tuple(value.shape), tuple(current_value.shape))
+                )
+                continue
+            state_dict[name] = value
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             log.info(
                 "Non-strict checkpoint init completed with missing=%s unexpected=%s",
                 missing,
                 unexpected,
+            )
+        if skipped_shape_mismatch:
+            log.info(
+                "Skipped checkpoint tensors with shape mismatch: %s",
+                skipped_shape_mismatch,
             )
 
     log.info("Instantiating callbacks...")

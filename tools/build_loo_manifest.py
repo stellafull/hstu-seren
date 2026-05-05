@@ -58,13 +58,14 @@ def load_sid_lookup(path: str | None):
     raise ValueError(f'Unsupported SID lookup: {path}')
 
 
-def sid_for(item: int, sid_lookup) -> list[int]:
-    if sid_lookup is None or item < 0 or item >= sid_lookup.size(0): return []
-    return [int(x) for x in sid_lookup[int(item)].tolist()]
+def sid_for(item: int, sid_lookup, item_shift: int = 0) -> list[int]:
+    lookup_item = int(item) + int(item_shift)
+    if sid_lookup is None or lookup_item < 0 or lookup_item >= sid_lookup.size(0): return []
+    return [int(x) for x in sid_lookup[lookup_item].tolist()]
 
 
-def has_sid(item: int, sid_lookup) -> bool:
-    sid=sid_for(item, sid_lookup)
+def has_sid(item: int, sid_lookup, item_shift: int = 0) -> bool:
+    sid=sid_for(item, sid_lookup, item_shift=item_shift)
     return bool(sid) and all(x != 0 for x in sid)
 
 
@@ -72,7 +73,7 @@ def main() -> None:
     ap=argparse.ArgumentParser()
     ap.add_argument('--dataset', required=True); ap.add_argument('--input', required=True, type=Path)
     ap.add_argument('--output-dir', type=Path, default=None); ap.add_argument('--split-version', default='loo_v1')
-    ap.add_argument('--sid-lookup', default=None); ap.add_argument('--trie', default=None)
+    ap.add_argument('--sid-lookup', default=None); ap.add_argument('--sid-item-shift', type=int, default=0); ap.add_argument('--trie', default=None)
     args=ap.parse_args(); out=args.output_dir or Path('tmp/loo_manifest')/args.dataset; out.mkdir(parents=True, exist_ok=True)
     df=pd.read_csv(args.input) if args.input.suffix=='.csv' else pd.read_parquet(args.input)
     sid_lookup=load_sid_lookup(args.sid_lookup)
@@ -91,12 +92,12 @@ def main() -> None:
         ser=[ser[i] for i in order] if ser and len(ser)>=n else [0]*n
         user=d.get('user_id'); target=int(items[-1]); history=[int(x) for x in items[:-1]]; item_universe.update(items)
         target_ser=int(ser[-1]) if ser else 0; ser_count += int(target_ser==1)
-        target_sid=sid_for(target, sid_lookup); history_sids=[sid_for(int(x), sid_lookup) for x in history]
-        eval_rows.append({'dataset':args.dataset,'split_version':args.split_version,'user_id':user,'raw_user_id':user,'history_items':dumps(history),'history_ratings':dumps(ratings[:-1]),'history_timestamps':dumps(times[:-1]),'target_item':target,'target_rating':ratings[-1],'target_timestamp':times[-1],'target_ser_label':target_ser,'target_sid':dumps(target_sid),'history_sids':dumps(history_sids),'num_history':len(history),'target_in_item_universe':True,'target_in_sid_lookup':has_sid(target,sid_lookup),'target_in_trie':has_sid(target,sid_lookup)})
+        target_sid=sid_for(target, sid_lookup, args.sid_item_shift); history_sids=[sid_for(int(x), sid_lookup, args.sid_item_shift) for x in history]
+        eval_rows.append({'dataset':args.dataset,'split_version':args.split_version,'user_id':user,'raw_user_id':user,'history_items':dumps(history),'history_ratings':dumps(ratings[:-1]),'history_timestamps':dumps(times[:-1]),'target_item':target,'target_rating':ratings[-1],'target_timestamp':times[-1],'target_ser_label':target_ser,'target_sid':dumps(target_sid),'history_sids':dumps(history_sids),'num_history':len(history),'target_in_item_universe':True,'target_in_sid_lookup':has_sid(target,sid_lookup,args.sid_item_shift),'target_in_trie':has_sid(target,sid_lookup,args.sid_item_shift)})
         train_rows.append({'dataset':args.dataset,'split_version':args.split_version,'user_id':user,'train_items':dumps(history),'train_ratings':dumps(ratings[:-1]),'train_timestamps':dumps(times[:-1]),'train_sids':dumps(history_sids),'num_train_items':len(history)})
     eval_df=pd.DataFrame(eval_rows); train_df=pd.DataFrame(train_rows)
     eval_path=out/'loo_eval.parquet'; train_path=out/'loo_train.parquet'; eval_df.to_parquet(eval_path,index=False); train_df.to_parquet(train_path,index=False)
-    meta={'protocol':'LOO_FULL_CATALOG','k_values':[10,50,100,200],'num_eval_rows':int(len(eval_df)),'num_ser_target_rows':int(ser_count),'item_universe_size':int(len(item_universe)),'sid_lookup_coverage':float(eval_df['target_in_sid_lookup'].mean()) if len(eval_df) else 0.0,'trie_coverage':float(eval_df['target_in_trie'].mean()) if len(eval_df) else 0.0,'item_universe_hash':sha_obj(sorted(item_universe)),'sid_lookup_hash':file_sha(args.sid_lookup),'trie_hash':file_sha(args.trie),'created_from_git_commit':subprocess.getoutput('git rev-parse HEAD 2>/dev/null')}
+    meta={'protocol':'LOO_FULL_CATALOG','k_values':[10,20,50,100,200],'num_eval_rows':int(len(eval_df)),'num_ser_target_rows':int(ser_count),'item_universe_size':int(len(item_universe)),'sid_item_shift':int(args.sid_item_shift),'sid_lookup_coverage':float(eval_df['target_in_sid_lookup'].mean()) if len(eval_df) else 0.0,'trie_coverage':float(eval_df['target_in_trie'].mean()) if len(eval_df) else 0.0,'item_universe_hash':sha_obj(sorted(item_universe)),'sid_lookup_hash':file_sha(args.sid_lookup),'trie_hash':file_sha(args.trie),'created_from_git_commit':subprocess.getoutput('git rev-parse HEAD 2>/dev/null')}
     meta['manifest_hash']=sha_obj({'eval':eval_rows,'train':train_rows,'meta':{k:v for k,v in meta.items() if k!='manifest_hash'}})
     (out/'manifest_meta.json').write_text(json.dumps(meta,indent=2,sort_keys=True)+'\n')
     print(json.dumps({'eval':str(eval_path),'train':str(train_path),**meta}, sort_keys=True))

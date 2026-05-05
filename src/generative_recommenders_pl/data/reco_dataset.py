@@ -1,5 +1,6 @@
 import ast
 import json
+import bisect
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,10 +46,13 @@ def parse_sequence_value(value: Any) -> list[Any]:
         text = value.strip()
         if not text:
             return []
-        if text[0] in "[(":
+        if text[0] in "[{":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = ast.literal_eval(text)
+        elif text[0] == "(":
             parsed = ast.literal_eval(text)
-        elif text[0] == "{":
-            parsed = json.loads(text)
         else:
             parsed = [part for part in text.split(",") if part != ""]
     elif hasattr(value, "tolist"):
@@ -284,6 +288,182 @@ class RecoDataset(torch.utils.data.Dataset):
         return ret
 
 
+class LOOManifestEvalDataset(torch.utils.data.Dataset):
+    """Evaluation dataset backed by frozen LOO_FULL_CATALOG manifest rows."""
+
+    def __init__(
+        self,
+        ratings_file: str | pd.DataFrame,
+        padding_length: int,
+        shift_id_by: int = 0,
+        chronological: bool = True,
+        **_: object,
+    ) -> None:
+        super().__init__()
+        self._padding_length = int(padding_length)
+        self._shift_id_by = int(shift_id_by)
+        self._chronological = bool(chronological)
+        self._materialize(load_data(ratings_file))
+
+    def __len__(self) -> int:
+        return int(self.target_ids.size(0))
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        return {
+            "user_id": self.user_ids[idx],
+            "historical_ids": self.historical_ids[idx],
+            "historical_ratings": self.historical_ratings[idx],
+            "historical_timestamps": self.historical_timestamps[idx],
+            "history_lengths": self.history_lengths[idx],
+            "target_ids": self.target_ids[idx],
+            "target_ratings": self.target_ratings[idx],
+            "target_timestamps": self.target_timestamps[idx],
+            "target_ser_label": self.target_ser_labels[idx],
+        }
+
+    def _materialize(self, frame: pd.DataFrame) -> None:
+        max_seq_len = self._padding_length - 1
+        row_count = len(frame)
+        self.user_ids: list[Any] = [None] * row_count
+        self.historical_ids = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.historical_ratings = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.historical_timestamps = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.history_lengths = torch.zeros(row_count, dtype=torch.int64)
+        self.target_ids = torch.empty(row_count, dtype=torch.int64)
+        self.target_ratings = torch.empty(row_count, dtype=torch.int64)
+        self.target_timestamps = torch.empty(row_count, dtype=torch.int64)
+        self.target_ser_labels = torch.zeros(row_count, dtype=torch.int64)
+
+        for row_idx, row in enumerate(frame.itertuples(index=False)):
+            history_items = [
+                int(float(x)) + self._shift_id_by
+                for x in parse_sequence_value(row.history_items)
+            ]
+            history_ratings = [int(float(x)) for x in parse_sequence_value(row.history_ratings)]
+            history_timestamps = [
+                int(float(x)) for x in parse_sequence_value(row.history_timestamps)
+            ]
+            history_length = min(len(history_items), max_seq_len)
+            if not self._chronological:
+                history_items = list(reversed(history_items))[:max_seq_len]
+                history_ratings = list(reversed(history_ratings))[:max_seq_len]
+                history_timestamps = list(reversed(history_timestamps))[:max_seq_len]
+            else:
+                history_items = history_items[-max_seq_len:]
+                history_ratings = history_ratings[-max_seq_len:]
+                history_timestamps = history_timestamps[-max_seq_len:]
+
+            self.user_ids[row_idx] = row.user_id
+            self.history_lengths[row_idx] = history_length
+            if history_items:
+                length = len(history_items)
+                self.historical_ids[row_idx, :length] = torch.tensor(
+                    history_items,
+                    dtype=torch.int64,
+                )
+                self.historical_ratings[row_idx, :length] = torch.tensor(
+                    history_ratings,
+                    dtype=torch.int64,
+                )
+                self.historical_timestamps[row_idx, :length] = torch.tensor(
+                    history_timestamps,
+                    dtype=torch.int64,
+                )
+            self.target_ids[row_idx] = int(float(row.target_item)) + self._shift_id_by
+            self.target_ratings[row_idx] = int(float(row.target_rating))
+            self.target_timestamps[row_idx] = int(float(row.target_timestamp))
+            self.target_ser_labels[row_idx] = int(float(getattr(row, "target_ser_label", 0)))
+
+
+class LOOManifestTrainDataset(torch.utils.data.Dataset):
+    """User-level LOO train rows for next-transition policy training."""
+
+    def __init__(
+        self,
+        ratings_file: str | pd.DataFrame,
+        padding_length: int,
+        shift_id_by: int = 0,
+        chronological: bool = True,
+        **_: object,
+    ) -> None:
+        super().__init__()
+        self._padding_length = int(padding_length)
+        self._shift_id_by = int(shift_id_by)
+        self._chronological = bool(chronological)
+        self._materialize(load_data(ratings_file))
+
+    def __len__(self) -> int:
+        return int(self.target_ids.size(0))
+
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        return {
+            "user_id": self.user_ids[idx],
+            "historical_ids": self.historical_ids[idx],
+            "historical_ratings": self.historical_ratings[idx],
+            "historical_timestamps": self.historical_timestamps[idx],
+            "history_lengths": self.history_lengths[idx],
+            "target_ids": self.target_ids[idx],
+            "target_ratings": self.target_ratings[idx],
+            "target_timestamps": self.target_timestamps[idx],
+        }
+
+    def _materialize(self, frame: pd.DataFrame) -> None:
+        max_seq_len = self._padding_length - 1
+        row_count = len(frame)
+        self.user_ids: list[Any] = [None] * row_count
+        self.historical_ids = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.historical_ratings = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.historical_timestamps = torch.zeros((row_count, max_seq_len), dtype=torch.int64)
+        self.history_lengths = torch.zeros(row_count, dtype=torch.int64)
+        self.target_ids = torch.empty(row_count, dtype=torch.int64)
+        self.target_ratings = torch.empty(row_count, dtype=torch.int64)
+        self.target_timestamps = torch.empty(row_count, dtype=torch.int64)
+
+        for row_idx, row in enumerate(frame.itertuples(index=False)):
+            items = [int(float(x)) for x in parse_sequence_value(row.train_items)]
+            ratings = [int(float(x)) for x in parse_sequence_value(row.train_ratings)]
+            timestamps = [int(float(x)) for x in parse_sequence_value(row.train_timestamps)]
+            n = min(len(items), len(ratings), len(timestamps))
+            items, ratings, timestamps = items[:n], ratings[:n], timestamps[:n]
+            if len(items) < 2:
+                raise ValueError("LOOManifestTrainDataset rows need at least two train items")
+
+            window_len = self._padding_length
+            if not self._chronological:
+                items = list(reversed(items))[:window_len]
+                ratings = list(reversed(ratings))[:window_len]
+                timestamps = list(reversed(timestamps))[:window_len]
+            else:
+                items = items[-window_len:]
+                ratings = ratings[-window_len:]
+                timestamps = timestamps[-window_len:]
+
+            historical_items = [int(item) + self._shift_id_by for item in items[:-1]]
+            historical_ratings = ratings[:-1]
+            historical_timestamps = timestamps[:-1]
+            history_length = min(len(historical_items), max_seq_len)
+
+            self.user_ids[row_idx] = row.user_id
+            self.history_lengths[row_idx] = history_length
+            if historical_items:
+                length = len(historical_items)
+                self.historical_ids[row_idx, :length] = torch.tensor(
+                    historical_items,
+                    dtype=torch.int64,
+                )
+                self.historical_ratings[row_idx, :length] = torch.tensor(
+                    historical_ratings,
+                    dtype=torch.int64,
+                )
+                self.historical_timestamps[row_idx, :length] = torch.tensor(
+                    historical_timestamps,
+                    dtype=torch.int64,
+                )
+            self.target_ids[row_idx] = int(items[-1]) + self._shift_id_by
+            self.target_ratings[row_idx] = int(float(ratings[-1]))
+            self.target_timestamps[row_idx] = int(float(timestamps[-1]))
+
+
 
 class FutureWindowTargetDataset(torch.utils.data.Dataset):
     """Dataset over V2 future-window target rows.
@@ -300,9 +480,14 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
         padding_length: int,
         max_i_targets: int = 3,
         max_a_targets: int = 32,
+        shift_id_by: int = 0,
         sid_columns: int | None = None,
         chronological: bool = True,
         emit_rank_from_future_targets: bool = False,
+        rank_geometry_levels: str = "adaptive_semantic_non_dedup",
+        rank_geometry_recency_decay: float = 0.85,
+        rank_geometry_epsilon: float = 1e-6,
+        rank_geometry_history_len: int | None = None,
         **_: object,
     ) -> None:
         super().__init__()
@@ -314,9 +499,16 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
         self._history_padding_length = max(self._padding_length - 1, 1)
         self.max_i_targets = int(max_i_targets)
         self.max_a_targets = int(max_a_targets)
+        self._shift_id_by = int(shift_id_by)
         self.sid_columns = int(sid_columns or self._infer_sid_columns())
         self._chronological = bool(chronological)
         self.emit_rank_from_future_targets = bool(emit_rank_from_future_targets)
+        self.rank_geometry_levels = rank_geometry_levels
+        self.rank_geometry_recency_decay = float(rank_geometry_recency_decay)
+        self.rank_geometry_epsilon = float(rank_geometry_epsilon)
+        self.rank_geometry_history_len = (
+            None if rank_geometry_history_len is None else int(rank_geometry_history_len)
+        )
 
     def __len__(self) -> int:
         return len(self.ratings_frame)
@@ -436,11 +628,14 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
         timestamp_t = self._row_value(row, "timestamp_t", 0)
         ret = {
             "user_id": row.user_id,
-            "historical_ids": self._pad_1d(history_items, torch.int64),
+            "historical_ids": self._pad_1d(
+                [item + self._shift_id_by for item in history_items],
+                torch.int64,
+            ),
             "historical_ratings": self._pad_1d(history_ratings, torch.int64),
             "historical_timestamps": self._pad_1d(history_timestamps, torch.int64),
             "history_lengths": torch.tensor(history_length, dtype=torch.int64),
-            "target_ids": torch.tensor(int(r_item), dtype=torch.int64),
+            "target_ids": torch.tensor(int(r_item) + self._shift_id_by, dtype=torch.int64),
             "target_ratings": torch.tensor(int(float(r_rating)), dtype=torch.int64),
             "target_timestamps": torch.tensor(int(float(timestamp_t)), dtype=torch.int64),
             "I_sids": i_sids,
@@ -464,7 +659,227 @@ class FutureWindowTargetDataset(torch.utils.data.Dataset):
             ret["rank_geometry"] = prefix_surprise(
                 valid_history_sids,
                 rank_sids,
-                levels="adaptive_semantic_non_dedup",
+                levels=self.rank_geometry_levels,
+                recency_decay=self.rank_geometry_recency_decay,
+                epsilon=self.rank_geometry_epsilon,
+                max_history=self.rank_geometry_history_len,
+            ).to(torch.float32)
+            ret["rank_positive_mask"] = positive_mask
+        return ret
+
+
+class DynamicFutureWindowTargetDataset(torch.utils.data.Dataset):
+    """Dynamically constructs sparse V2 future-window targets from LOO train rows."""
+
+    def __init__(
+        self,
+        ratings_file: str | pd.DataFrame,
+        padding_length: int,
+        max_i_targets: int = 3,
+        max_a_targets: int = 32,
+        shift_id_by: int = 0,
+        sid_columns: int | None = None,
+        chronological: bool = True,
+        emit_rank_from_future_targets: bool = False,
+        imminent_window: int = 3,
+        acceptable_min_gap: int = 4,
+        acceptable_window: int = 50,
+        rating_positive_threshold: float = 4.0,
+        exclude_seen: bool = True,
+        rank_geometry_levels: str = "adaptive_semantic_non_dedup",
+        rank_geometry_recency_decay: float = 0.85,
+        rank_geometry_epsilon: float = 1e-6,
+        rank_geometry_history_len: int | None = None,
+        **_: object,
+    ) -> None:
+        super().__init__()
+        self.ratings_frame = load_data(ratings_file)
+        self._padding_length = int(padding_length)
+        self._history_padding_length = max(self._padding_length - 1, 1)
+        self.max_i_targets = int(max_i_targets)
+        self.max_a_targets = int(max_a_targets)
+        self._shift_id_by = int(shift_id_by)
+        self.sid_columns = int(sid_columns or self._infer_sid_columns())
+        self._chronological = bool(chronological)
+        self.emit_rank_from_future_targets = bool(emit_rank_from_future_targets)
+        self.imminent_window = int(imminent_window)
+        self.acceptable_min_gap = int(acceptable_min_gap)
+        self.acceptable_window = int(acceptable_window)
+        self.rating_positive_threshold = float(rating_positive_threshold)
+        self.exclude_seen = bool(exclude_seen)
+        self.rank_geometry_levels = rank_geometry_levels
+        self.rank_geometry_recency_decay = float(rank_geometry_recency_decay)
+        self.rank_geometry_epsilon = float(rank_geometry_epsilon)
+        self.rank_geometry_history_len = (
+            None if rank_geometry_history_len is None else int(rank_geometry_history_len)
+        )
+        lengths = []
+        for value in self.ratings_frame["train_items"].tolist():
+            lengths.append(len(self._loads(value)))
+        self._sequence_lengths = lengths
+        self._cum_positions: list[int] = []
+        total = 0
+        for length in lengths:
+            total += max(int(length) - 1, 0)
+            self._cum_positions.append(total)
+
+    @staticmethod
+    def _loads(value):
+        return FutureWindowTargetDataset._loads(value)
+
+    def _infer_sid_columns(self) -> int:
+        if "train_sids" not in self.ratings_frame.columns:
+            return 4
+        for value in self.ratings_frame["train_sids"].tolist():
+            parsed = self._loads(value)
+            if parsed and parsed[0]:
+                return len(parsed[0])
+        return 4
+
+    def __len__(self) -> int:
+        return self._cum_positions[-1] if self._cum_positions else 0
+
+    def _position(self, idx: int) -> tuple[int, int]:
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        row_idx = bisect.bisect_right(self._cum_positions, idx)
+        prev = 0 if row_idx == 0 else self._cum_positions[row_idx - 1]
+        return row_idx, idx - prev
+
+    def _pad_1d(self, values: list[int | float], dtype=torch.int64) -> torch.Tensor:
+        values = list(values)
+        if len(values) > self._history_padding_length:
+            values = values[-self._history_padding_length:] if self._chronological else values[: self._history_padding_length]
+        if len(values) < self._history_padding_length:
+            values = values + [0] * (self._history_padding_length - len(values))
+        return torch.tensor(values, dtype=dtype)
+
+    def _sids_tensor(self, sids: list[list[int]], max_targets: int) -> torch.Tensor:
+        out = torch.zeros((max_targets, self.sid_columns), dtype=torch.int64)
+        for idx, sid in enumerate(sids[:max_targets]):
+            if not sid:
+                continue
+            sid = [int(token) for token in sid[: self.sid_columns]]
+            out[idx, : len(sid)] = torch.tensor(sid, dtype=torch.int64)
+        return out
+
+    def _targets(
+        self,
+        items: list[int],
+        ratings: list[float],
+        sids: list[list[int]],
+        position_t: int,
+    ) -> tuple[list[tuple[int, int, float, list[int]]], list[tuple[int, int, float, list[int]]]]:
+        seen = set(items[: position_t + 1])
+        imminent: list[tuple[int, int, float, list[int]]] = []
+        acceptable: list[tuple[int, int, float, list[int]]] = []
+        for delta in range(1, self.imminent_window + 1):
+            pos = position_t + delta
+            if pos >= len(items):
+                break
+            if self.exclude_seen and items[pos] in seen:
+                continue
+            imminent.append((items[pos], delta, ratings[pos], sids[pos]))
+        a_start = max(self.acceptable_min_gap, self.imminent_window + 1)
+        for delta in range(a_start, self.acceptable_window + 1):
+            pos = position_t + delta
+            if pos >= len(items):
+                break
+            if ratings[pos] < self.rating_positive_threshold:
+                continue
+            if self.exclude_seen and items[pos] in seen:
+                continue
+            acceptable.append((items[pos], delta, ratings[pos], sids[pos]))
+        imminent = self._dedup(imminent, key=lambda row: row[1])[: self.max_i_targets]
+        blocked = {int(row[0]) for row in imminent}
+        acceptable = [
+            row
+            for row in self._dedup(acceptable, key=lambda row: (-row[2], row[1]))
+            if int(row[0]) not in blocked
+        ][: self.max_a_targets]
+        return imminent, acceptable
+
+    @staticmethod
+    def _dedup(items: list[tuple[int, int, float, list[int]]], key) -> list[tuple[int, int, float, list[int]]]:
+        out = []
+        seen: set[int] = set()
+        for row in sorted(items, key=key):
+            item = int(row[0])
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(row)
+        return out
+
+    def _rank_candidates(
+        self,
+        acceptable: list[tuple[int, int, float, list[int]]],
+        imminent: list[tuple[int, int, float, list[int]]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        i_items = {int(row[0]) for row in imminent}
+        candidates = torch.zeros((self.max_a_targets + self.max_i_targets, self.sid_columns), dtype=torch.int64)
+        positive_mask = torch.zeros(self.max_a_targets + self.max_i_targets, dtype=torch.bool)
+        cursor = 0
+        for row in acceptable:
+            if int(row[0]) in i_items or not row[3]:
+                continue
+            candidates[cursor] = self._sids_tensor([row[3]], 1)[0]
+            positive_mask[cursor] = True
+            cursor += 1
+            if cursor >= self.max_a_targets:
+                break
+        for row in imminent:
+            if cursor >= candidates.size(0):
+                break
+            if not row[3]:
+                continue
+            candidates[cursor] = self._sids_tensor([row[3]], 1)[0]
+            cursor += 1
+        return candidates, positive_mask
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row_idx, position_t = self._position(int(idx))
+        row = self.ratings_frame.iloc[row_idx]
+        items = [int(float(x)) for x in self._loads(row.train_items)]
+        ratings = [float(x) for x in self._loads(row.train_ratings)]
+        timestamps = [int(float(x)) for x in self._loads(row.train_timestamps)]
+        sids = self._loads(row.train_sids) if "train_sids" in row.index else [[] for _ in items]
+        n = min(len(items), len(ratings), len(timestamps), len(sids))
+        items, ratings, timestamps, sids = items[:n], ratings[:n], timestamps[:n], sids[:n]
+        history_items = items[: position_t + 1]
+        history_ratings = ratings[: position_t + 1]
+        history_timestamps = timestamps[: position_t + 1]
+        history_sids = sids[: position_t + 1]
+        target_pos = position_t + 1
+        imminent, acceptable = self._targets(items, ratings, sids, position_t)
+        i_sids = self._sids_tensor([row[3] for row in imminent], self.max_i_targets)
+        a_sids = self._sids_tensor([row[3] for row in acceptable], self.max_a_targets)
+        ret = {
+            "user_id": row.user_id,
+            "historical_ids": self._pad_1d([item + self._shift_id_by for item in history_items], torch.int64),
+            "historical_ratings": self._pad_1d([int(float(x)) for x in history_ratings], torch.int64),
+            "historical_timestamps": self._pad_1d(history_timestamps, torch.int64),
+            "history_lengths": torch.tensor(min(len(history_items), self._history_padding_length), dtype=torch.int64),
+            "target_ids": torch.tensor(int(items[target_pos]) + self._shift_id_by, dtype=torch.int64),
+            "target_ratings": torch.tensor(int(float(ratings[target_pos])), dtype=torch.int64),
+            "target_timestamps": torch.tensor(int(float(timestamps[position_t])), dtype=torch.int64),
+            "I_sids": i_sids,
+            "A_sids": a_sids,
+        }
+        if self.emit_rank_from_future_targets:
+            rank_sids, positive_mask = self._rank_candidates(acceptable, imminent)
+            history_sid_tensor = self._sids_tensor(history_sids, max(len(history_sids), 1))
+            valid_history_sids = history_sid_tensor[(history_sid_tensor != 0).all(dim=1)]
+            ret["rank_candidate_sids"] = rank_sids
+            ret["rank_geometry"] = prefix_surprise(
+                valid_history_sids,
+                rank_sids,
+                levels=self.rank_geometry_levels,
+                recency_decay=self.rank_geometry_recency_decay,
+                epsilon=self.rank_geometry_epsilon,
+                max_history=self.rank_geometry_history_len,
             ).to(torch.float32)
             ret["rank_positive_mask"] = positive_mask
         return ret
@@ -484,6 +899,7 @@ class RecoDataModule(L.LightningDataModule):
         num_workers: Optional[int] = None,
         prefetch_factor: int = 4,
         pin_memory: bool = False,
+        persistent_workers: bool = False,
         semantic_id_prefix: str | None = None,
     ):
         super().__init__()
@@ -507,6 +923,7 @@ class RecoDataModule(L.LightningDataModule):
         self.num_workers = int(num_workers)
         self.prefetch = prefetch_factor if self.num_workers > 0 else None
         self.pin_memory = bool(pin_memory)
+        self.persistent_workers = bool(persistent_workers) and self.num_workers > 0
         self.semantic_id_prefix = semantic_id_prefix
         self.__init_item_ids()
 
@@ -599,6 +1016,8 @@ class RecoDataModule(L.LightningDataModule):
         }
         if self.prefetch is not None:
             kwargs["prefetch_factor"] = self.prefetch
+        if self.persistent_workers:
+            kwargs["persistent_workers"] = True
         return torch.utils.data.DataLoader(self.train_dataset, **kwargs)
 
     def val_dataloader(self):
@@ -609,6 +1028,8 @@ class RecoDataModule(L.LightningDataModule):
         }
         if self.prefetch is not None:
             kwargs["prefetch_factor"] = self.prefetch
+        if self.persistent_workers:
+            kwargs["persistent_workers"] = True
         return torch.utils.data.DataLoader(self.val_dataset, **kwargs)
 
     def test_dataloader(self):
@@ -619,6 +1040,8 @@ class RecoDataModule(L.LightningDataModule):
         }
         if self.prefetch is not None:
             kwargs["prefetch_factor"] = self.prefetch
+        if self.persistent_workers:
+            kwargs["persistent_workers"] = True
         return torch.utils.data.DataLoader(self.test_dataset, **kwargs)
 
     def predict_dataloader(self):
@@ -629,6 +1052,8 @@ class RecoDataModule(L.LightningDataModule):
         }
         if self.prefetch is not None:
             kwargs["prefetch_factor"] = self.prefetch
+        if self.persistent_workers:
+            kwargs["persistent_workers"] = True
         return torch.utils.data.DataLoader(self.test_dataset, **kwargs)
 
     def save_predictions(self, output_file: str, predictions: dict):

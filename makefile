@@ -39,11 +39,14 @@ semantic_id_pipeline: ## Run full embedding→training→inference pipeline
 	python src/generative_recommenders_pl/scripts/semantic_id_pipeline.py $(MAKEOVERRIDES)
 
 v2-test: ## Run V2 protocol/unit gates
-	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_loo_manifest.py tests/test_future_window_targets.py tests/test_no_ser_label_leakage.py tests/test_lf_rank_miner.py
+	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_loo_manifest.py tests/test_ser_event_manifest.py tests/test_future_window_targets.py tests/test_no_ser_label_leakage.py tests/test_lf_rank_miner.py
 	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_trie_multipositive_loss.py tests/test_geometry_features.py tests/test_collision_resolver.py tests/test_aig_geo_inference.py
 	PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_v2_wiring.py tests/test_future_window_dataset.py
 v2-build-loo: ## Build V2 LOO manifest: make v2-build-loo DATASET=x INPUT=path.csv SID_LOOKUP=path.pt
 	.venv/bin/python tools/build_loo_manifest.py --dataset $(DATASET) --input $(INPUT) --sid-lookup $(SID_LOOKUP)
+
+v2-build-ser-event: ## Build ser-positive event manifest: make v2-build-ser-event DATASET=x INPUT=path.csv SID_LOOKUP=path.pt
+	.venv/bin/python tools/build_ser_event_manifest.py --dataset $(DATASET) --input $(INPUT) --sid-lookup $(SID_LOOKUP)
 
 v2-audit-loo: ## Audit V2 LOO manifest: make v2-audit-loo MANIFEST_DIR=tmp/loo_manifest/x
 	.venv/bin/python tools/audit_loo_manifest.py $(MANIFEST_DIR)

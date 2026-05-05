@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - serenfree_v2_eval_loo_movielens
+  - _self_
+
+tags: ["serenfree_v2", "movielens", "eval", "ser_event_full_catalog"]
+
+serenfree_eval:
+  manifest_dir: ${paths.root_dir}/tmp/ser_event_manifest/movielens/ser_event_v1
+
+data:
+  test_dataset:
+    ratings_file: ${serenfree_eval.manifest_dir}/test_eval.parquet
+
+metrics:
+  buckets: ["ser_targets_only"]

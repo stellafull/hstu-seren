@@ -1,24 +1,40 @@
 # @package _global_
 
 defaults:
-  - serenfree_stage1_serenlens_movies
+  - serenfree_stage1_amazon_movies
   - _self_
 
 tags: ["serenfree_v2", "movies", "r_pretrain", "loo_full_catalog"]
 
 protocol:
   name: LOO_FULL_CATALOG
-  k_values: [10, 50, 100, 200]
+  k_values: [10, 20, 50, 100, 200]
   forbid_sampled_eval: true
   forbid_gts_eval: true
 
 model:
+  training_objective: next_transition_policy
+  next_transition_loss_positions: last
   future_target_loss: legacy_history_proxy
   require_future_targets: false
+  rating_positive_threshold: 4.0
+  detach_aux_context: true
   lambda_i: 0.0
   lambda_a: 0.0
   lambda_rank: 0.0
   stopgrad_R_in_rank: true
+
+data:
+  train_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestTrainDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movies/loo_v1/loo_train.parquet
+    shift_id_by: 1
+  val_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestEvalDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movies/loo_v1/loo_eval.parquet
+    shift_id_by: 1
+  batch_size: 256
+  num_workers: 8
 
 label_free:
   forbid_ser_labels_in_train: true

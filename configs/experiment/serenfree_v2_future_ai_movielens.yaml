@@ -4,37 +4,48 @@ defaults:
   - serenfree_v2_r_pretrain_movielens
   - _self_
 
-tags: ["serenfree_v2", "movielens", "future_ai", "label_free"]
+tags: ["serenfree_v2", "movielens", "rai_policy", "label_free"]
 
 model:
   decoder_modes: null
   lambda_i: 0.2
   lambda_a: 0.2
-  future_target_loss: trie_marginal
-  require_future_targets: true
+  training_objective: next_transition_policy
+  next_transition_loss_positions: last
+  future_target_loss: legacy_history_proxy
+  require_future_targets: false
+  detach_aux_context: true
 
-future_targets:
-  imminent_window: 3
-  acceptable_min_gap: 4
-  acceptable_window: 50
+callbacks:
+  model_checkpoint:
+    monitor: val/ndcg@100
+    mode: max
+    save_top_k: 1
+    save_last: true
+  early_stopping:
+    monitor: val/ndcg@100
+    mode: max
+    patience: 10
+
+rai_policy:
+  semantic_cols_only_for_i_a: true
+  full_sid_cols_for_r: true
+  recent_window_size: 10
+  aig_promote_only: true
   rating_positive_threshold: 4.0
-  max_i_targets: 3
-  max_a_targets: 32
-  exclude_seen: true
-  cap_policy_A: rating_then_recency
-  cap_policy_I: earliest
-  target_loss: trie_marginal
 
 
 test: false
 
 data:
   train_dataset:
-    _target_: generative_recommenders_pl.data.reco_dataset.FutureWindowTargetDataset
-    ratings_file: ${paths.root_dir}/tmp/future_targets/movielens/loo_v1/future_targets.parquet
-    max_i_targets: ${future_targets.max_i_targets}
-    max_a_targets: ${future_targets.max_a_targets}
-    emit_rank_from_future_targets: false
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestTrainDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movielens/loo_v1/loo_train.parquet
+    shift_id_by: 1
+  val_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestEvalDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movielens/loo_v1/loo_eval.parquet
+    shift_id_by: 1
 serenfree_v2:
   decoder_modes: ["R", "I", "A"]
   train_dedup_for_R: true

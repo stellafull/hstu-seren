@@ -23,3 +23,15 @@ def test_prefix_surprise_and_relevance_guard():
     scored, mask, _ = relevance_safe_geometry_boost(rel, geo, ranks, beta=1.0, relevance_floor_rank=10, low_q=0.0, high_q=1.0)
     assert not mask[1]
     assert scored[1] == rel[1]
+
+
+def test_prefix_surprise_respects_max_history_and_epsilon():
+    hist = torch.tensor([[1, 1, 1], [2, 2, 1]])
+    cand = torch.tensor([[1, 1, 1], [2, 2, 1]])
+
+    all_history = prefix_surprise(hist, cand, levels=[1, 2], epsilon=1e-4)
+    recent_only = prefix_surprise(hist, cand, levels=[1, 2], epsilon=1e-4, max_history=1)
+
+    assert all_history[0] < recent_only[0]
+    assert recent_only[0].item() == pytest.approx(-torch.log(torch.tensor(1e-4)).item())
+    assert recent_only[1] < all_history[1]

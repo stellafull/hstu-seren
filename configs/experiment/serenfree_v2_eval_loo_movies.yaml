@@ -17,10 +17,14 @@ inference:
   beta_grid: [0.0, 0.1, 0.25, 0.5, 1.0]
   aig_levels: adaptive_semantic_non_dedup
   geometry_levels: adaptive_semantic_non_dedup
+  geometry_recency_decay: ${geometry.recency_decay}
+  geometry_epsilon: ${geometry.epsilon}
+  geometry_history_len: ${geometry.history_len}
   touch_dedup: false
   history_filter: true
 
 serenfree_eval:
+  manifest_dir: ${paths.root_dir}/tmp/loo_manifest/movies/loo_v1
   beam_size: 1000
   aig: false
   aig_alpha: ${inference.alpha}
@@ -29,10 +33,19 @@ serenfree_eval:
   relevance_floor_rank: ${inference.relevance_floor_rank}
   beta: ${inference.beta}
   geometry_levels: ${inference.geometry_levels}
+  geometry_recency_decay: ${inference.geometry_recency_decay}
+  geometry_epsilon: ${inference.geometry_epsilon}
+  geometry_history_len: ${inference.geometry_history_len}
   aig_levels: adaptive_semantic_non_dedup
   filter_history: true
-  ks: [10, 50, 100, 200]
+  ks: [10, 20, 50, 100, 200]
+
+data:
+  test_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestEvalDataset
+    ratings_file: ${serenfree_eval.manifest_dir}/loo_eval.parquet
+    shift_id_by: 1
 
 metrics:
   buckets: ["all", "ser_targets_only"]
-  k_values: [10, 50, 100, 200]
+  k_values: [10, 20, 50, 100, 200]

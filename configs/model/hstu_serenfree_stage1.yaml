@@ -8,6 +8,9 @@ semantic_id_prefix: ${oc.select:data.semantic_id_prefix,${data.data_preprocessor
 embedding_dim: 256
 lambda_d: 1.0
 compile_model: false
+validation_ks: [10, 20, 50, 100, 200]
+validation_beam_size: 200
+validation_eval_batch_size: 64
 
 sequence_encoder:
   _target_: generative_recommenders_pl.models.sequential_encoders.hstu.HSTU
@@ -37,6 +40,6 @@ optimizer:
 scheduler: null
 
 configure_optimizer_params:
-  monitor: val/full_sid_acc
+  monitor: val/ndcg@100
   interval: epoch
   frequency: 1

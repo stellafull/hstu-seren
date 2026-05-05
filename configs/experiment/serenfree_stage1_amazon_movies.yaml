@@ -32,12 +32,12 @@ callbacks:
   model_checkpoint:
     dirpath: ${paths.root_dir}/tmp/checkpoints/amazon_movies_serenfree_stage1
     filename: "epoch_{epoch:03d}"
-    monitor: val/full_sid_acc
+    monitor: val/ndcg@100
     mode: max
     save_last: true
     save_top_k: 1
   early_stopping:
-    monitor: val/full_sid_acc
+    monitor: val/ndcg@100
     mode: max
     patience: 10
 

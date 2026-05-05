@@ -17,7 +17,17 @@ class RingBounds:
     high: float
 
 
-def prefix_surprise(history_sids: torch.Tensor, candidate_sids: torch.Tensor, *, levels="adaptive_semantic_non_dedup", recency_decay: float = 0.85, epsilon: float = 1e-6) -> torch.Tensor:
+def prefix_surprise(
+    history_sids: torch.Tensor,
+    candidate_sids: torch.Tensor,
+    *,
+    levels="adaptive_semantic_non_dedup",
+    recency_decay: float = 0.85,
+    epsilon: float = 1e-6,
+    max_history: int | None = None,
+) -> torch.Tensor:
+    if max_history is not None and int(max_history) > 0:
+        history_sids = history_sids[-int(max_history):]
     selected = semantic_non_dedup_levels(candidate_sids.size(1), levels)
     hist = history_sids[:, list(selected)].to(torch.long)
     cand = candidate_sids[:, list(selected)].to(torch.long)

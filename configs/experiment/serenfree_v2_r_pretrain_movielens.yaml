@@ -1,24 +1,44 @@
 # @package _global_
 
 defaults:
-  - serenfree_stage1_serendipity_2018
+  - serenfree_stage1_amazon_movies
+  - override /data: serendipity_2018_training
   - _self_
 
 tags: ["serenfree_v2", "movielens", "r_pretrain", "loo_full_catalog"]
 
-protocol:
-  name: LOO_FULL_CATALOG
-  k_values: [10, 50, 100, 200]
-  forbid_sampled_eval: true
-  forbid_gts_eval: true
-
 model:
+  semantic_id_prefix: serendipity_2018
+  item_lookup_path: ${paths.root_dir}/tmp/pre_train/serendipity-2018/item_lookup.csv
+  sid_lookup_path: ${paths.root_dir}/tmp/semantic_id/serendipity_2018/item_sid_lookup_shifted.pt
+  training_objective: next_transition_policy
+  next_transition_loss_positions: last
   future_target_loss: legacy_history_proxy
   require_future_targets: false
+  rating_positive_threshold: 4.0
+  detach_aux_context: true
   lambda_i: 0.0
   lambda_a: 0.0
   lambda_rank: 0.0
   stopgrad_R_in_rank: true
+
+data:
+  train_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestTrainDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movielens/loo_v1/loo_train.parquet
+    shift_id_by: 1
+  val_dataset:
+    _target_: generative_recommenders_pl.data.reco_dataset.LOOManifestEvalDataset
+    ratings_file: ${paths.root_dir}/tmp/loo_manifest/movielens/loo_v1/loo_eval.parquet
+    shift_id_by: 1
+  batch_size: 256
+  num_workers: 8
+
+protocol:
+  name: LOO_FULL_CATALOG
+  k_values: [10, 20, 50, 100, 200]
+  forbid_sampled_eval: true
+  forbid_gts_eval: true
 
 label_free:
   forbid_ser_labels_in_train: true

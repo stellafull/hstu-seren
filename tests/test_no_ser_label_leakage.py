@@ -74,10 +74,28 @@ def test_training_and_miner_outputs_exclude_ser_labels(tmp_path):
         ]
     )
 
+    ser_event_manifest = tmp_path / "ser_event_manifest"
+    subprocess.check_call(
+        [
+            sys.executable,
+            "tools/build_ser_event_manifest.py",
+            "--dataset",
+            "tiny",
+            "--input",
+            str(src),
+            "--output-dir",
+            str(ser_event_manifest),
+        ]
+    )
+
     eval_df = pd.read_parquet(manifest_dir / "loo_eval.parquet")
     train_df = pd.read_parquet(manifest_dir / "loo_train.parquet")
     mined_df = pd.read_parquet(mined)
+    ser_event_train_df = pd.read_parquet(
+        ser_event_manifest / "strict_train.parquet"
+    )
 
     assert "target_ser_label" in eval_df.columns
     assert FORBIDDEN_SER_FIELDS.isdisjoint(train_df.columns)
     assert FORBIDDEN_SER_FIELDS.isdisjoint(mined_df.columns)
+    assert FORBIDDEN_SER_FIELDS.isdisjoint(ser_event_train_df.columns)

@@ -4,17 +4,13 @@ defaults:
   - serenfree_v2_future_ai_movielens
   - _self_
 
-tags: ["serenfree_v2", "movielens", "lf_rank", "label_free"]
+tags: ["serenfree_v2", "movielens", "aig_geometry_report", "label_free"]
 
 model:
-  lambda_rank: 0.05
+  lambda_rank: 0.0
   rank_temperature: 0.1
   stopgrad_R_in_rank: true
 
-
-data:
-  train_dataset:
-    emit_rank_from_future_targets: true
 
 geometry:
   enabled: true
@@ -33,7 +29,7 @@ loss:
   lambda_R: 1.0
   lambda_I: 0.2
   lambda_A: 0.2
-  lambda_rank: 0.05
+  lambda_rank: 0.0
   rank_temperature: 0.1
   rank_pos_max: 4
   rank_neg_max: 64

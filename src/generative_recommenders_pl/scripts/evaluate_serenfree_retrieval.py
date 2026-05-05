@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ring-low-quantile", type=float, default=None)
     parser.add_argument("--ring-high-quantile", type=float, default=None)
     parser.add_argument("--geometry-recency-decay", type=float, default=None)
+    parser.add_argument("--geometry-epsilon", type=float, default=None)
+    parser.add_argument("--geometry-history-len", type=int, default=None)
     parser.add_argument("--pseudo-ser-path", type=Path, default=None)
     parser.add_argument("--progress-every", type=int, default=None)
     parser.add_argument(
@@ -169,7 +171,7 @@ def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
     if args.beam_size is None:
         args.beam_size = int(configured("beam_size", 400))
     if args.ks is None:
-        args.ks = [int(k) for k in configured("ks", [10, 50, 100, 200])]
+        args.ks = [int(k) for k in configured("ks", [10, 20, 50, 100, 200])]
     if args.max_batches is None:
         max_batches = configured("max_batches", None)
         args.max_batches = None if max_batches is None else int(max_batches)
@@ -217,6 +219,11 @@ def apply_eval_config(args: argparse.Namespace, cfg: Any) -> None:
         args.ring_high_quantile = float(configured("ring_high_quantile", 0.95))
     if args.geometry_recency_decay is None:
         args.geometry_recency_decay = float(configured("geometry_recency_decay", 0.85))
+    if args.geometry_epsilon is None:
+        args.geometry_epsilon = float(configured("geometry_epsilon", 1e-6))
+    if args.geometry_history_len is None:
+        history_len = configured("geometry_history_len", None)
+        args.geometry_history_len = None if history_len is None else int(history_len)
     if args.pseudo_ser_path is None:
         pseudo_ser_path = configured("pseudo_ser_path", None)
         args.pseudo_ser_path = (
@@ -371,6 +378,7 @@ def audit_pipeline(
     cfg: Any,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    manifest_meta = load_manifest_meta(cfg, args)
     return {
         "checkpoint": str(args.checkpoint),
         "experiment": args.experiment,
@@ -399,6 +407,9 @@ def audit_pipeline(
         "relevance_floor_rank": int(args.relevance_floor_rank),
         "geometry_beta": float(args.beta),
         "geometry_levels": args.geometry_levels,
+        "geometry_recency_decay": float(args.geometry_recency_decay),
+        "geometry_epsilon": float(args.geometry_epsilon),
+        "geometry_history_len": args.geometry_history_len,
         "geometry_touches_dedup": False
         if args.geometry_levels == "adaptive_semantic_non_dedup"
         else (trie_audit["dedup_column"] + 1) in args.geometry_levels,
@@ -410,8 +421,57 @@ def audit_pipeline(
         "dedup_relevance_only_for_stage1": True,
         "sid_lookup_path": str(cfg.model.get("sid_lookup_path")),
         "sid_path": str(cfg.model.sid_path),
+        "loo_manifest_meta_path": manifest_meta.get("_meta_path"),
+        "eval_protocol": manifest_meta.get("protocol"),
+        "eval_denominator": manifest_meta.get("denominator"),
+        "loo_manifest_hash": manifest_meta.get("manifest_hash"),
+        "item_universe_hash": manifest_meta.get("item_universe_hash"),
+        "manifest_sid_lookup_hash": manifest_meta.get("sid_lookup_hash"),
+        "manifest_trie_hash": manifest_meta.get("trie_hash"),
         **trie_audit,
     }
+
+
+def load_manifest_meta(cfg: Any, args: argparse.Namespace) -> dict[str, Any]:
+    candidates: list[Path] = []
+    manifest_dir = _cfg_path(cfg, "serenfree_eval", "manifest_dir")
+    if manifest_dir is not None:
+        candidates.append(Path(str(manifest_dir)) / "manifest_meta.json")
+    eval_path = _split_ratings_path(cfg, str(args.split))
+    if eval_path is not None:
+        candidates.append(Path(str(eval_path)).parent / "manifest_meta.json")
+    for path in candidates:
+        if path.exists():
+            meta = json.loads(path.read_text())
+            meta["_meta_path"] = str(path)
+            return meta
+    return {}
+
+
+def _cfg_path(cfg: Any, *keys: str) -> Any:
+    cur = cfg
+    for key in keys:
+        if cur is None or key not in cur:
+            return None
+        cur = cur[key]
+    return cur
+
+
+def _split_ratings_path(cfg: Any, split: str) -> Any:
+    data_cfg = cfg.get("data")
+    if data_cfg is None:
+        return None
+    dataset_key = {
+        "train": "train_dataset",
+        "val": "val_dataset",
+        "test": "test_dataset",
+    }.get(split)
+    if dataset_key is None or dataset_key not in data_cfg:
+        return None
+    dataset_cfg = data_cfg[dataset_key]
+    if dataset_cfg is None or "ratings_file" not in dataset_cfg:
+        return None
+    return dataset_cfg["ratings_file"]
 
 
 @torch.inference_mode()
@@ -445,14 +505,42 @@ def evaluate(
             break
         contexts = encode_contexts(model=model, batch=batch, device=device)
         beam_aig = None if late_fusion is not None else aig
-        beams_by_row = batched_constrained_beam_search(
-            decoder=model.decoder,
-            contexts=contexts,
-            sid_index=sid_index,
-            beam_size=beam_size,
-            aig=beam_aig,
-        )
-        if late_fusion is not None:
+        if late_fusion is None or float(late_fusion.beta) == 0.0:
+            item_ids, scores, sid_tokens = batched_constrained_beam_search_tensors(
+                decoder=model.decoder,
+                contexts=contexts,
+                sid_index=sid_index,
+                beam_size=beam_size,
+                aig=beam_aig,
+            )
+            if late_fusion is not None and float(late_fusion.alpha) != 0.0:
+                scores = apply_late_fusion_to_candidate_tensors(
+                    decoder=model.decoder,
+                    contexts=contexts,
+                    sid_tokens=sid_tokens,
+                    scores=scores,
+                    cfg=late_fusion,
+                )
+            update_tensor_totals(
+                model=model,
+                totals=totals,
+                counts=counts,
+                item_ids=item_ids,
+                scores=scores,
+                batch=batch,
+                ks=ks,
+                device=device,
+                filter_history=filter_history,
+                pseudo_ser_labels=pseudo_ser_labels,
+            )
+        else:
+            beams_by_row = batched_constrained_beam_search(
+                decoder=model.decoder,
+                contexts=contexts,
+                sid_index=sid_index,
+                beam_size=beam_size,
+                aig=beam_aig,
+            )
             beams_by_row = apply_late_fusion_to_beams(
                 model=model,
                 contexts=contexts,
@@ -461,48 +549,18 @@ def evaluate(
                 cfg=late_fusion,
                 device=device,
             )
-
-        target_ids = batch["target_ids"].to(torch.long)
-        history_ids = batch["historical_ids"].to(torch.long)
-        target_ser_labels = batch.get("target_ser_label")
-        target_sids = model._item_ids_to_sid(target_ids.to(device)).cpu()
-        target_has_sid = (target_sids != 0).all(dim=1)
-
-        for row_idx, beams in enumerate(beams_by_row):
-            target = int(target_ids[row_idx].item())
-            history = history_ids[row_idx]
-            seen = {
-                int(item)
-                for item in history.tolist()
-                if int(item) > 0
-            }
-            if target in seen:
-                counts["target_in_history"] += 1
-            ranked = rank_items(
-                beams=beams,
-                seen=seen,
-                filter_history=filter_history,
+            update_list_totals(
+                model=model,
+                totals=totals,
+                counts=counts,
+                beams_by_row=beams_by_row,
+                batch=batch,
+                ks=ks,
                 max_k=max_k,
+                device=device,
+                filter_history=filter_history,
+                pseudo_ser_labels=pseudo_ser_labels,
             )
-            update_totals(totals["all"], ranked, target, ks)
-            counts["all"] += 1
-            if bool(target_has_sid[row_idx].item()):
-                update_totals(totals["eligible"], ranked, target, ks)
-                counts["eligible"] += 1
-            else:
-                counts["unmapped_target"] += 1
-            has_true_ser_label = (
-                target_ser_labels is not None
-                and int(target_ser_labels[row_idx].item()) == 1
-            )
-            has_pseudo_ser_label = pseudo_ser_labels is not None and target in pseudo_ser_labels
-            if has_true_ser_label or has_pseudo_ser_label:
-                update_totals(totals["ser"], ranked, target, ks, prefix="_ser")
-                counts["ser_label"] += 1
-                if has_true_ser_label:
-                    counts["true_ser_label"] += 1
-                if has_pseudo_ser_label:
-                    counts["pseudo_ser_label"] += 1
 
         if progress_every > 0 and (batch_idx + 1) % progress_every == 0:
             elapsed = time.monotonic() - started_at
@@ -578,6 +636,143 @@ def encode_contexts(
 
 
 @torch.inference_mode()
+def update_tensor_totals(
+    model: torch.nn.Module,
+    totals: dict[str, dict[str, float]],
+    counts: defaultdict[str, int],
+    item_ids: torch.Tensor,
+    scores: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+    ks: list[int],
+    device: torch.device,
+    filter_history: bool,
+    pseudo_ser_labels: set[int] | None,
+) -> None:
+    target_ids_device = batch["target_ids"].to(device, dtype=torch.long)
+    history_ids = batch["historical_ids"].to(device, dtype=torch.long)
+    target_sids = model._item_ids_to_sid(target_ids_device)
+    target_has_sid = (target_sids != 0).all(dim=1)
+    if filter_history:
+        seen = item_ids.unsqueeze(-1).eq(history_ids.unsqueeze(1)).any(dim=-1)
+        keep_target = item_ids.eq(target_ids_device.unsqueeze(1))
+        scores = scores.masked_fill(seen & ~keep_target, -torch.inf)
+    target_in_history = history_ids.eq(target_ids_device.unsqueeze(1)).any(dim=1)
+    counts["target_in_history"] += int(target_in_history.sum().item())
+
+    max_k = max(ks)
+    top_count = min(max_k, item_ids.size(1))
+    top_pos = scores.topk(top_count, dim=1).indices
+    ranked_items = item_ids.gather(1, top_pos)
+    target_matches = ranked_items.eq(target_ids_device.unsqueeze(1))
+    rank_positions = torch.arange(
+        ranked_items.size(1),
+        device=device,
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    first_rank = torch.where(target_matches, rank_positions, torch.inf).min(dim=1).values
+    valid_target = torch.isfinite(first_rank)
+    target_ser_labels = batch.get("target_ser_label")
+    if target_ser_labels is not None:
+        ser_mask = target_ser_labels.to(device, dtype=torch.long).eq(1)
+    else:
+        ser_mask = torch.zeros_like(target_ids_device, dtype=torch.bool)
+    if pseudo_ser_labels is not None:
+        pseudo_ser = torch.tensor(
+            [int(item) in pseudo_ser_labels for item in target_ids_device.detach().cpu().tolist()],
+            dtype=torch.bool,
+            device=device,
+        )
+        ser_mask = ser_mask | pseudo_ser
+
+    counts["all"] += int(target_ids_device.numel())
+    counts["eligible"] += int(target_has_sid.sum().item())
+    counts["unmapped_target"] += int((~target_has_sid).sum().item())
+    counts["ser_label"] += int(ser_mask.sum().item())
+    if target_ser_labels is not None:
+        counts["true_ser_label"] += int(target_ser_labels.to(device, dtype=torch.long).eq(1).sum().item())
+    if pseudo_ser_labels is not None:
+        counts["pseudo_ser_label"] += int(
+            torch.tensor(
+                [int(item) in pseudo_ser_labels for item in target_ids_device.detach().cpu().tolist()],
+                dtype=torch.bool,
+                device=device,
+            ).sum().item()
+        )
+
+    for k in ks:
+        hit = first_rank < float(k)
+        ndcg = torch.where(
+            hit,
+            1.0 / torch.log2(first_rank + 2.0),
+            torch.zeros_like(first_rank),
+        )
+        totals["all"][f"hr@{k}"] += float(hit.sum().item())
+        totals["all"][f"ndcg@{k}"] += float(ndcg.sum().item())
+        eligible_hit = hit & target_has_sid
+        totals["eligible"][f"hr@{k}"] += float(eligible_hit.sum().item())
+        totals["eligible"][f"ndcg@{k}"] += float(ndcg[target_has_sid].sum().item())
+        ser_hit = hit & ser_mask
+        totals["ser"][f"hr_ser@{k}"] += float(ser_hit.sum().item())
+        totals["ser"][f"ndcg_ser@{k}"] += float(ndcg[ser_mask].sum().item())
+
+
+def update_list_totals(
+    model: torch.nn.Module,
+    totals: dict[str, dict[str, float]],
+    counts: defaultdict[str, int],
+    beams_by_row: list[list[SIDBeam]],
+    batch: dict[str, torch.Tensor],
+    ks: list[int],
+    max_k: int,
+    device: torch.device,
+    filter_history: bool,
+    pseudo_ser_labels: set[int] | None,
+) -> None:
+    target_ids = batch["target_ids"].to(torch.long)
+    history_ids = batch["historical_ids"].to(torch.long)
+    target_ser_labels = batch.get("target_ser_label")
+    target_sids = model._item_ids_to_sid(target_ids.to(device)).cpu()
+    target_has_sid = (target_sids != 0).all(dim=1)
+
+    for row_idx, beams in enumerate(beams_by_row):
+        target = int(target_ids[row_idx].item())
+        history = history_ids[row_idx]
+        seen = {
+            int(item)
+            for item in history.tolist()
+            if int(item) > 0
+        }
+        if target in seen:
+            counts["target_in_history"] += 1
+        ranked = rank_items(
+            beams=beams,
+            seen=seen,
+            filter_history=filter_history,
+            max_k=max_k,
+            target=target,
+        )
+        update_totals(totals["all"], ranked, target, ks)
+        counts["all"] += 1
+        if bool(target_has_sid[row_idx].item()):
+            update_totals(totals["eligible"], ranked, target, ks)
+            counts["eligible"] += 1
+        else:
+            counts["unmapped_target"] += 1
+        has_true_ser_label = (
+            target_ser_labels is not None
+            and int(target_ser_labels[row_idx].item()) == 1
+        )
+        has_pseudo_ser_label = pseudo_ser_labels is not None and target in pseudo_ser_labels
+        if has_true_ser_label or has_pseudo_ser_label:
+            update_totals(totals["ser"], ranked, target, ks, prefix="_ser")
+            counts["ser_label"] += 1
+            if has_true_ser_label:
+                counts["true_ser_label"] += 1
+            if has_pseudo_ser_label:
+                counts["pseudo_ser_label"] += 1
+
+
+@torch.inference_mode()
 def batched_constrained_beam_search(
     decoder: torch.nn.Module,
     contexts: EvalContexts,
@@ -585,6 +780,38 @@ def batched_constrained_beam_search(
     beam_size: int,
     aig: "AIGConfig | None" = None,
 ) -> list[list[SIDBeam]]:
+    item_ids, scores, sid_tokens = batched_constrained_beam_search_tensors(
+        decoder=decoder,
+        contexts=contexts,
+        sid_index=sid_index,
+        beam_size=beam_size,
+        aig=aig,
+    )
+    scores_cpu = scores.detach().cpu()
+    item_ids_cpu = item_ids.detach().cpu()
+    sid_tokens_cpu = sid_tokens.detach().cpu()
+    results: list[list[SIDBeam]] = []
+    for row_idx in range(item_ids_cpu.size(0)):
+        row_results: list[SIDBeam] = []
+        for beam_idx in range(item_ids_cpu.size(1)):
+            item_id = int(item_ids_cpu[row_idx, beam_idx].item())
+            score = float(scores_cpu[row_idx, beam_idx].item())
+            if item_id < 0 or not math.isfinite(score):
+                continue
+            sid = tuple(int(token) for token in sid_tokens_cpu[row_idx, beam_idx].tolist())
+            row_results.append(SIDBeam(item_id=item_id, sid=sid, score=score))
+        results.append(row_results)
+    return results
+
+
+@torch.inference_mode()
+def batched_constrained_beam_search_tensors(
+    decoder: torch.nn.Module,
+    contexts: EvalContexts,
+    sid_index: SIDTransitionIndex,
+    beam_size: int,
+    aig: "AIGConfig | None" = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     context = contexts.relevance
     batch_size = int(context.size(0))
     semantic_levels = int(decoder.num_semantic_levels)
@@ -681,21 +908,7 @@ def batched_constrained_beam_search(
             item_ids = selected_item_ids
         scores = top_scores
 
-    scores_cpu = scores.detach().cpu()
-    item_ids_cpu = item_ids.detach().cpu()
-    sid_tokens_cpu = sid_tokens.detach().cpu()
-    results: list[list[SIDBeam]] = []
-    for row_idx in range(batch_size):
-        row_results: list[SIDBeam] = []
-        for beam_idx in range(item_ids_cpu.size(1)):
-            item_id = int(item_ids_cpu[row_idx, beam_idx].item())
-            score = float(scores_cpu[row_idx, beam_idx].item())
-            if item_id < 0 or not math.isfinite(score):
-                continue
-            sid = tuple(int(token) for token in sid_tokens_cpu[row_idx, beam_idx].tolist())
-            row_results.append(SIDBeam(item_id=item_id, sid=sid, score=score))
-        results.append(row_results)
-    return results
+    return item_ids, scores, sid_tokens
 
 
 def decoder_level_logits(
@@ -736,6 +949,8 @@ class LateFusionConfig:
     ring_low_quantile: float
     ring_high_quantile: float
     geometry_recency_decay: float
+    geometry_epsilon: float
+    geometry_history_len: int | None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "LateFusionConfig | None":
@@ -751,6 +966,8 @@ class LateFusionConfig:
             ring_low_quantile=float(args.ring_low_quantile),
             ring_high_quantile=float(args.ring_high_quantile),
             geometry_recency_decay=float(args.geometry_recency_decay),
+            geometry_epsilon=float(args.geometry_epsilon),
+            geometry_history_len=args.geometry_history_len,
         )
 
 
@@ -787,6 +1004,8 @@ def apply_late_fusion_to_beams(
             candidate_sids,
             levels=cfg.geometry_levels,
             recency_decay=cfg.geometry_recency_decay,
+            epsilon=cfg.geometry_epsilon,
+            max_history=cfg.geometry_history_len,
         )
         ranks = torch.arange(1, len(candidates) + 1, device=device)
         fused_scores, _, _ = relevance_safe_geometry_boost(
@@ -806,6 +1025,90 @@ def apply_late_fusion_to_beams(
             fused.extend(beams[len(candidates):])
         fused_rows.append(sorted(fused, key=lambda beam: beam.score, reverse=True))
     return fused_rows
+
+
+def apply_late_fusion_to_candidate_tensors(
+    decoder: torch.nn.Module,
+    contexts: EvalContexts,
+    sid_tokens: torch.Tensor,
+    scores: torch.Tensor,
+    cfg: LateFusionConfig,
+) -> torch.Tensor:
+    candidate_count = min(int(cfg.candidate_m), int(sid_tokens.size(1)))
+    fused = scores.clone()
+    fused[:, :candidate_count] = score_candidate_sid_tensors(
+        decoder=decoder,
+        contexts=EvalContexts(
+            relevance=contexts.relevance,
+            imminent=contexts.imminent,
+            acceptable=contexts.acceptable,
+        ),
+        candidate_sids=sid_tokens[:, :candidate_count],
+        alpha=cfg.alpha,
+    )
+    return fused
+
+
+def score_candidate_sid_tensors(
+    decoder: torch.nn.Module,
+    contexts: EvalContexts,
+    candidate_sids: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    semantic_levels = int(decoder.num_semantic_levels)
+    scores_r = candidate_sids.new_zeros(
+        candidate_sids.shape[:2],
+        dtype=torch.float32,
+    ).to(candidate_sids.device)
+    scores_a = scores_r.clone()
+    scores_i = scores_r.clone()
+    prefix_tokens = candidate_sids[..., :semantic_levels]
+    valid = (candidate_sids[..., : semantic_levels + 1] != 0).all(dim=-1)
+    for level in range(semantic_levels):
+        prefix_for_level = torch.zeros_like(prefix_tokens)
+        if level > 0:
+            prefix_for_level[..., :level] = prefix_tokens[..., :level]
+        tok = candidate_sids[..., level].to(torch.long)
+        logits_r = decoder_level_logits(
+            decoder=decoder,
+            context=contexts.relevance.unsqueeze(1).expand(-1, candidate_sids.size(1), -1),
+            prefix_tokens=prefix_for_level,
+            level=level,
+            mode=DecoderMode.RELEVANCE,
+        )
+        logits_a = decoder_level_logits(
+            decoder=decoder,
+            context=contexts.acceptable.unsqueeze(1).expand(-1, candidate_sids.size(1), -1),
+            prefix_tokens=prefix_for_level,
+            level=level,
+            mode=DecoderMode.ACCEPTABLE,
+        )
+        logits_i = decoder_level_logits(
+            decoder=decoder,
+            context=contexts.imminent.unsqueeze(1).expand(-1, candidate_sids.size(1), -1),
+            prefix_tokens=prefix_for_level,
+            level=level,
+            mode=DecoderMode.IMMINENT,
+        )
+        safe_tok = tok.clamp(min=0, max=logits_r.size(-1) - 1).unsqueeze(-1)
+        scores_r += F.log_softmax(logits_r, dim=-1).gather(-1, safe_tok).squeeze(-1)
+        scores_a += F.log_softmax(logits_a, dim=-1).gather(-1, safe_tok).squeeze(-1)
+        scores_i += F.log_softmax(logits_i, dim=-1).gather(-1, safe_tok).squeeze(-1)
+    dedup_level = semantic_levels
+    dedup_tok = candidate_sids[..., dedup_level].to(torch.long)
+    dedup_logits = decoder_level_logits(
+        decoder=decoder,
+        context=contexts.relevance.unsqueeze(1).expand(-1, candidate_sids.size(1), -1),
+        prefix_tokens=prefix_tokens,
+        level=dedup_level,
+        mode=DecoderMode.RELEVANCE,
+    )
+    safe_dedup_tok = dedup_tok.clamp(min=0, max=dedup_logits.size(-1) - 1).unsqueeze(-1)
+    scores_r += F.log_softmax(dedup_logits, dim=-1).gather(-1, safe_dedup_tok).squeeze(-1)
+    norm_a = _normalize_candidate_score_rows(scores_a, valid)
+    norm_i = _normalize_candidate_score_rows(scores_i, valid)
+    final = scores_r + float(alpha) * torch.clamp(norm_a - norm_i, min=0.0)
+    return final.masked_fill(~valid, -1.0e9)
 
 
 def score_candidate_sids(
@@ -852,8 +1155,30 @@ def score_candidate_sids(
     dedup_log_probs = F.log_softmax(dedup_logits, dim=-1)
     safe_dedup_tok = dedup_tok.clamp(min=0, max=dedup_log_probs.size(-1) - 1)
     scores_r += dedup_log_probs.gather(1, safe_dedup_tok.unsqueeze(1)).squeeze(1)
-    final = scores_r + float(alpha) * (scores_a - scores_i)
+    norm_a = _normalize_candidate_scores(scores_a, valid)
+    norm_i = _normalize_candidate_scores(scores_i, valid)
+    final = scores_r + float(alpha) * torch.clamp(norm_a - norm_i, min=0.0)
     return final.masked_fill(~valid, -1.0e9)
+
+
+def _normalize_candidate_scores(scores: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    out = torch.zeros_like(scores)
+    if not valid.any():
+        return out
+    valid_scores = scores[valid]
+    mean = valid_scores.mean()
+    std = valid_scores.std(unbiased=False).clamp_min(1e-6)
+    out[valid] = (valid_scores - mean) / std
+    return out
+
+
+def _normalize_candidate_score_rows(scores: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    masked = scores.masked_fill(~valid, 0.0)
+    count = valid.sum(dim=1, keepdim=True).clamp_min(1).to(scores.dtype)
+    mean = masked.sum(dim=1, keepdim=True) / count
+    centered = (scores - mean).masked_fill(~valid, 0.0)
+    std = torch.sqrt((centered.square().sum(dim=1, keepdim=True) / count).clamp_min(1e-12))
+    return torch.where(valid, centered / std, torch.zeros_like(scores))
 
 
 @dataclass(frozen=True)
@@ -922,11 +1247,12 @@ def rank_items(
     seen: set[int],
     filter_history: bool,
     max_k: int,
+    target: int | None = None,
 ) -> list[int]:
     ranked = []
     used = set()
     for beam in beams:
-        if filter_history and beam.item_id in seen:
+        if filter_history and beam.item_id in seen and beam.item_id != target:
             continue
         if beam.item_id in used:
             continue

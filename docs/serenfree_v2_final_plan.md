@@ -4,8 +4,17 @@ Status: active execution plan. This supersedes V1 Stage2/3/4 for new work.
 
 ## Non-negotiables
 
-- Evaluation protocol: `LOO_FULL_CATALOG` only. No GTS, sampled split, or 1-positive+100-negative eval.
-- Serendipity labels: final evaluation only (`metrics.ser_targets_only`). Never train, early-stop, mine, or tune hyperparameters on ser labels.
+- Default relevance protocol: `LOO_FULL_CATALOG`. It remains the main
+  relevance/full-catalog report and protects next-item relevance.
+- Additional serendipity protocol: `SER_EVENT_FULL_CATALOG` may be reported
+  alongside LOO for prefix-qualified ser-positive target events. Its denominator
+  is `num_ser_queries`, not all LOO users.
+- Sampled-candidate or 1-positive+N-negative eval is a separate protocol and
+  must not be mixed with full-catalog metrics.
+- SerenFree main method remains label-free: serendipity labels may not train,
+  mine targets, early-stop, or tune alpha/beta/temperature. Any run that uses
+  ser labels for HPO is a supervised or label-assisted comparison, not the
+  main SerenFree method.
 - Small serendipity datasets are still used for target-domain adaptation, but
   only through ordinary interaction sequences and label-free future-session
   acceptability targets.
@@ -27,10 +36,11 @@ Status: active execution plan. This supersedes V1 Stage2/3/4 for new work.
 ### Data / audit
 
 - `tools/build_loo_manifest.py`
+- `tools/build_ser_event_manifest.py`
 - `tools/audit_loo_manifest.py`
 - `tools/build_future_window_targets.py`
 - `tools/audit_ser_target_reachability.py`
-- tests for LOO, future windows, no ser-label leakage
+- tests for LOO, ser-event manifests, future windows, no ser-label leakage
 
 ### Model / loss
 
@@ -52,10 +62,21 @@ Status: active execution plan. This supersedes V1 Stage2/3/4 for new work.
 
 ```yaml
 protocol:
-  name: LOO_FULL_CATALOG
-  k_values: [10, 50, 100, 200]
-  forbid_sampled_eval: true
+  relevance_name: LOO_FULL_CATALOG
+  ser_event_name: SER_EVENT_FULL_CATALOG
+  k_values: [10, 20, 50, 100, 200]
+  default_report: LOO_FULL_CATALOG
+  compare_protocols: [LOO_FULL_CATALOG, SER_EVENT_FULL_CATALOG]
+  forbid_mixing_sampled_with_full_catalog: true
   forbid_gts_eval: true
+
+ser_event_validation:
+  min_prefix: 1
+  rating_positive_threshold: 4.0
+  split_policy: latest_positive_test_second_latest_positive_val
+  single_positive_policy: deterministic_user_hash_val_or_test
+  train_policy: strict_truncate_before_first_heldout_ser_event
+  denominator: num_ser_queries
 
 future_targets:
   imminent_window: 3
@@ -109,18 +130,20 @@ main_method:
 
 1. Freeze V1 S1 outputs/checkpoints/configs/audits.
 2. Build and freeze unified LOO manifests.
-3. Add eval JSON manifest and universe hashes.
-4. Run reachability audits, especially SerenLens Movies.
-5. Implement true future-window A/I targets.
-6. Implement multi-positive trie marginal loss.
-7. MovieLens R-only -> future A/I -> AIG+geometry eval -> LF-rank.
-8. Extend to Books; run Movies only after reachability audit passes.
+3. Build optional ser-event full-catalog manifests for datasets with ser labels.
+4. Add eval JSON manifest and universe hashes.
+5. Run reachability audits, especially SerenLens Movies.
+6. Implement true future-window A/I targets.
+7. Implement multi-positive trie marginal loss.
+8. MovieLens R-only -> future A/I -> AIG+geometry eval -> LF-rank.
+9. Extend to Books; run Movies only after reachability audit passes.
 
 ## Current implementation notes
 
-- Future-window targets are used for V2 training only. Validation and test use
-  the ordinary LOO last-item `RecoDataset` setup (`ignore_last_n=0`) to avoid
-  creating additional small-dataset splits.
+- Future-window targets are used for V2 training only. Relevance validation and
+  test use frozen LOO manifests. Serendipity labels can additionally be reported
+  through frozen `SER_EVENT_FULL_CATALOG` manifests, but those metrics must not
+  choose main-method checkpoints or hyperparameters.
 - Stage 2 on SerenLens / Serendipity-2018 is label-free domain adaptation:
   use the dataset's ordinary interaction sequences to build near-session `I_t`
   and future-session acceptable `A_t`; do not use `sequence_ser_label` or answer
@@ -128,6 +151,9 @@ main_method:
 - `ser_targets_only` is a final reporting bucket in
   `evaluate_serenfree_retrieval.py`; it must not drive training, early stopping,
   checkpoint selection, or hyperparameter selection.
+- In LOO, `ser_targets_only` is sparse because only last-item ser positives
+  count. In ser-event evaluation, every row is a ser-positive query, so
+  `ser_targets_only` equals the protocol denominator `num_ser_queries`.
 - Any run that uses ser labels for loss, alpha/beta selection, early stopping,
   or HPO must be reported separately as supervised or label-assisted baseline,
   not as the SerenFree main method.
